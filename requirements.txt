@@ -3,6 +3,8 @@ gradio==5.49.1
 python-dotenv==1.2.1
 fastapi>=0.115.2,<0.122.0
 uvicorn[standard]==0.27.0
+gunicorn
+
 
 
 # Google AI
@@ -48,3 +50,4 @@ replicate==1.0.7
 # Utilities
 
 python-dateutil==2.9.0.post0
+
