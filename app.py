@@ -3750,6 +3750,37 @@ def setup_api_routes(app: FastAPI):
         allow_headers=["*"],
     )
 
+    # ===== ADD THESE NEW ENDPOINTS HERE ✅ =====
+    @app.get("/health")
+    async def health_check():
+        """Health check for Render monitoring"""
+        port = int(os.environ.get("PORT", 7860))
+        return {
+            "status": "healthy",
+            "service": "All Mind AI",
+            "port": port,
+            "environment": "Render" if os.environ.get("RENDER") else "Local",
+            "mongodb": "connected" if MONGODB_AVAILABLE else "unavailable",
+            "firebase": "enabled" if FIREBASE_AVAILABLE else "disabled",
+            "replicate": "enabled" if REPLICATE_AVAILABLE else "disabled",
+            "current_user": current_user.get("username", "None")
+        }
+
+    @app.get("/")
+    async def root():
+        """Root API endpoint"""
+        return {
+            "message": "All Mind AI is running!",
+            "endpoints": {
+                "health": "/health",
+                "firebase_auth": "/firebase-auth",
+                "check_auth": "/api/check-auth",
+                "test_firebase": "/test-firebase"
+            }
+        }
+
+    # ============================================
+
     @app.get("/firebase-auth")
     async def firebase_auth_page(request: Request):
         """Serve Firebase auth page"""
@@ -4470,6 +4501,7 @@ if __name__ == "__main__":
 
     logging.info(f"\n{'=' * 60}")
     logging.info(f"🚀 All Mind Starting on Port {port}")
+    logging.info(f"🌐 Bind Address: 0.0.0.0:{port}")
     logging.info(f"🌐 Environment: {'Render' if os.environ.get('RENDER') else 'Local'}")
     logging.info(f"{'=' * 60}\n")
 
