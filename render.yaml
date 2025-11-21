@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: all-mind-ai
+    env: python
+    region: oregon
+    plan: free
+
+    # Install system dependencies
+    buildCommand: |
+      apt-get update && \
+      apt-get install -y tesseract-ocr tesseract-ocr-eng libgl1 libglib2.0-0 && \
+      pip install --upgrade pip setuptools wheel && \
+      pip install -r requirements.txt
+
+    # Start command for Gradio
+    startCommand: python app.py
+
+    # Environment variables
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.13
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        generateValue: true
+      - key: RENDER
+        value: "true"
