@@ -124,39 +124,36 @@ except ImportError:
 FIREBASE_AVAILABLE = False
 
 try:
-    # Option 1: Try service account file path from environment
-    firebase_service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
-
-    if os.path.exists(firebase_service_account_path):
-        cred = credentials.Certificate(firebase_service_account_path)
-
-        # Check if Firebase is already initialized
-        try:
-            firebase_admin.get_app()
-            logging.info("✅ Firebase already initialized")
-            FIREBASE_AVAILABLE = True
-        except ValueError:
-            # Not initialized yet, so initialize it
-            firebase_admin.initialize_app(cred)
-            FIREBASE_AVAILABLE = True
-            logging.info("✅ Firebase Admin SDK initialized successfully from file")
-    else:
-        # Option 2: Try JSON string from environment variable
+    # Try to initialize Firebase (check if already done first)
+    try:
+        firebase_admin.get_app()
+        FIREBASE_AVAILABLE = True
+        logging.info("✅ Firebase already initialized")
+    except ValueError:
+        # Not initialized yet - try environment variable first (for Render/production)
         firebase_creds_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+
         if firebase_creds_json:
+            # Production: Load from environment variable
+            logging.info("🔥 Loading Firebase from environment variable...")
             cred_dict = json.loads(firebase_creds_json)
             cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred)
+            FIREBASE_AVAILABLE = True
+            logging.info("✅ Firebase Admin SDK initialized from environment variable")
+        else:
+            # Local development: Try file path
+            firebase_service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
 
-            try:
-                firebase_admin.get_app()
-                FIREBASE_AVAILABLE = True
-            except ValueError:
+            if os.path.exists(firebase_service_account_path):
+                logging.info("🔥 Loading Firebase from file...")
+                cred = credentials.Certificate(firebase_service_account_path)
                 firebase_admin.initialize_app(cred)
                 FIREBASE_AVAILABLE = True
-                logging.info("✅ Firebase Admin SDK initialized from environment variable")
-        else:
-            logging.warning("⚠️ Firebase service account not configured. Google Sign-In will be unavailable.")
-            FIREBASE_AVAILABLE = False
+                logging.info("✅ Firebase Admin SDK initialized from file")
+            else:
+                logging.warning("⚠️ Firebase service account not configured. Google Sign-In will be unavailable.")
+                FIREBASE_AVAILABLE = False
 
 except Exception as e:
     FIREBASE_AVAILABLE = False
@@ -4468,50 +4465,29 @@ if os.environ.get("RENDER"):
         logging.warning("⚠️ pytesseract not available")
 
 if __name__ == "__main__":
-    import socket
-
-    # Get port from environment (Render sets this) or default to 7860
+    # Get port from environment (Render sets this)
     port = int(os.environ.get("PORT", 7860))
-
-    # ✅ FIXED: Skip port conflict check on Render entirely
-    if not os.environ.get("RENDER"):
-        def is_port_in_use(port):
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try:
-                    s.bind(('0.0.0.0', port))
-                    return False
-                except OSError:
-                    return True
-
-        if is_port_in_use(port):
-            logging.warning(f"⚠️ Port {port} in use, finding alternative...")
-            for test_port in range(7860, 7870):
-                if not is_port_in_use(test_port):
-                    port = test_port
-                    logging.info(f"✅ Using port {port} instead")
-                    break
-            else:
-                logging.error("❌ No available ports found")
-                exit(1)
 
     logging.info(f"\n{'=' * 60}")
     logging.info(f"🚀 All Mind Starting on Port {port}")
-    logging.info(f"🌐 Main UI: http://0.0.0.0:{port}")
-    logging.info(f"🔥 Firebase: http://0.0.0.0:{port}/firebase-auth")
-    logging.info(f"📡 API: http://0.0.0.0:{port}/api/firebase-login")
+    logging.info(f"🌐 Environment: {'Render' if os.environ.get('RENDER') else 'Local'}")
     logging.info(f"{'=' * 60}\n")
 
-    # Launch Gradio with FastAPI integration
-    demo.queue()
-
-    # Register Firebase routes if available
+    # Register Firebase routes BEFORE queueing/launching
     if FIREBASE_AVAILABLE:
         setup_api_routes(demo.app)
         logging.info("✅ Firebase API routes registered with Gradio")
 
+    # Queue for handling multiple concurrent users
+    demo.queue(max_size=20)
+
+    # Launch with production-ready settings
     demo.launch(
         server_name="0.0.0.0",
         server_port=port,
         share=False,
-        show_error=True  # ✅ ADD THIS: Shows detailed errors
+        show_error=True,
+        quiet=False,
+        ssl_verify=False,
+        prevent_thread_lock=False
     )
