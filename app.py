@@ -1,4 +1,5 @@
 import gradio as gr
+import os
 from dotenv import load_dotenv
 import requests
 from urllib.parse import quote
@@ -28,22 +29,47 @@ import argostranslate.translate
 # Correct import (one line)
 from langdetect import detect, DetectorFactory
 import logging
-import uvicorn
 import google.generativeai as genai
 import os
 import firebase_admin
 from firebase_admin import credentials, auth as firebase_auth
+from flask import Flask, request, jsonify
+import threading
 import random
 import string
 import smtplib
+import queue
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import threading
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
-
+flask_app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+try:
+    firebase_service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
+
+    if os.path.exists(firebase_service_account_path):
+        cred = credentials.Certificate(firebase_service_account_path)
+        try:
+            firebase_admin.get_app()
+            logging.info("✅ Firebase already initialized")
+        except ValueError:
+            firebase_admin.initialize_app(cred)
+            logging.info("✅ Firebase Admin SDK initialized successfully from file")
+    else:
+        firebase_creds_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+        if firebase_creds_json:
+            cred_dict = json.loads(firebase_creds_json)
+            cred = credentials.Certificate(cred_dict)
+            try:
+                firebase_admin.get_app()
+                logging.info("✅ Firebase already initialized")
+            except ValueError:
+                firebase_admin.initialize_app(cred)
+                logging.info("✅ Firebase Admin SDK initialized from environment variable")
+        else:
+            logging.warning("⚠️ Firebase service account not configured. Google Sign-In unavailable.")
+except Exception as e:
+    logging.error(f"❌ Firebase initialization failed: {e}", exc_info=True)
 
 MONGODB_URI = os.getenv("MONGODB_URI")
 import traceback
@@ -124,36 +150,39 @@ except ImportError:
 FIREBASE_AVAILABLE = False
 
 try:
-    # Try to initialize Firebase (check if already done first)
-    try:
-        firebase_admin.get_app()
-        FIREBASE_AVAILABLE = True
-        logging.info("✅ Firebase already initialized")
-    except ValueError:
-        # Not initialized yet - try environment variable first (for Render/production)
-        firebase_creds_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    # Option 1: Try service account file path from environment
+    firebase_service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
 
-        if firebase_creds_json:
-            # Production: Load from environment variable
-            logging.info("🔥 Loading Firebase from environment variable...")
-            cred_dict = json.loads(firebase_creds_json)
-            cred = credentials.Certificate(cred_dict)
+    if os.path.exists(firebase_service_account_path):
+        cred = credentials.Certificate(firebase_service_account_path)
+
+        # Check if Firebase is already initialized
+        try:
+            firebase_admin.get_app()
+            logging.info("✅ Firebase already initialized")
+            FIREBASE_AVAILABLE = True
+        except ValueError:
+            # Not initialized yet, so initialize it
             firebase_admin.initialize_app(cred)
             FIREBASE_AVAILABLE = True
-            logging.info("✅ Firebase Admin SDK initialized from environment variable")
-        else:
-            # Local development: Try file path
-            firebase_service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
+            logging.info("✅ Firebase Admin SDK initialized successfully from file")
+    else:
+        # Option 2: Try JSON string from environment variable
+        firebase_creds_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+        if firebase_creds_json:
+            cred_dict = json.loads(firebase_creds_json)
+            cred = credentials.Certificate(cred_dict)
 
-            if os.path.exists(firebase_service_account_path):
-                logging.info("🔥 Loading Firebase from file...")
-                cred = credentials.Certificate(firebase_service_account_path)
+            try:
+                firebase_admin.get_app()
+                FIREBASE_AVAILABLE = True
+            except ValueError:
                 firebase_admin.initialize_app(cred)
                 FIREBASE_AVAILABLE = True
-                logging.info("✅ Firebase Admin SDK initialized from file")
-            else:
-                logging.warning("⚠️ Firebase service account not configured. Google Sign-In will be unavailable.")
-                FIREBASE_AVAILABLE = False
+                logging.info("✅ Firebase Admin SDK initialized from environment variable")
+        else:
+            logging.warning("⚠️ Firebase service account not configured. Google Sign-In will be unavailable.")
+            FIREBASE_AVAILABLE = False
 
 except Exception as e:
     FIREBASE_AVAILABLE = False
@@ -185,8 +214,7 @@ users_collection = None
 if MONGODB_AVAILABLE:
     try:
         MONGODB_URI = os.getenv("MONGODB_URI")
-        # Line ~319, change:
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=30000)
+        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
         client.server_info()
         db = client["manjula_ai"]
         users_collection = db["users"]
@@ -280,11 +308,20 @@ guest_chat_count = 0
 GUEST_CHAT_LIMIT = 10
 
 # ================================
+# INSTANT FIREBASE LOGIN DETECTION
+# ================================
+firebase_login_queue = queue.Queue()  # ✅ Thread-safe queue for instant updates
+
+def notify_gradio_login(user_data):
+    """Signal that Firebase login occurred with user data"""
+    firebase_login_queue.put(user_data)
+    logging.info(f"🔔 Gradio notified of Firebase login: {user_data.get('username')}")
+
+# ================================
 #  LANGUAGE TRANSLATION MODULE
 # ================================
 # --- Cache for installed languages ---
 INSTALLED_LANGS = {}
-
 
 def _ensure_language_pack(source_code: str, target_code: str):
     """Download language pack if not already installed."""
@@ -612,13 +649,8 @@ def verify_firebase_token(id_token):
         print(traceback.format_exc())
         return None
 
-
 def register_or_login_firebase_user(user_info):
-    """
-    Register or login user from Firebase authentication
-    ✅ PREVENTS duplicate email registration
-    ✅ Handles both Google and traditional auth users
-    """
+    """Register or login user from Firebase authentication"""
     global current_session_id, guest_chat_count
 
     if not MONGODB_AVAILABLE:
@@ -632,61 +664,41 @@ def register_or_login_firebase_user(user_info):
 
     try:
         username = user_info["email"].split("@")[0].lower()
-        email = user_info["email"].lower()  # ✅ FIXED: Lowercase comparison
+        email = user_info["email"]
         full_name = user_info.get("name", "")
 
-        # ✅ Check if user exists by email (case-insensitive)
+        # Check if user exists
         existing_user = users_collection.find_one({"email": email})
 
         if existing_user:
-            # ✅ Email already registered - check auth provider
-            auth_provider = existing_user.get("auth_provider", "email")
+            # Login existing user
+            clear_guest_history()
+            guest_chat_count = 0
+            current_session_id += 1
 
-            if auth_provider == "google":
-                # Existing Google user - LOG THEM IN
-                clear_guest_history()
-                guest_chat_count = 0
-                current_session_id += 1
+            users_collection.update_one(
+                {"email": email},
+                {"$set": {"last_login": datetime.now()}}
+            )
 
-                users_collection.update_one(
-                    {"email": email},
-                    {"$set": {"last_login": datetime.now()}}
-                )
+            current_user["username"] = existing_user["username"]
+            current_user["logged_in"] = True
+            current_user["is_guest"] = False
+            current_user["email"] = email
+            current_user["full_name"] = existing_user.get("full_name", full_name)
 
-                current_user["username"] = existing_user["username"]
-                current_user["logged_in"] = True
-                current_user["is_guest"] = False
-                current_user["email"] = email
-                current_user["full_name"] = existing_user.get("full_name", full_name)
+            # ✅ INSTANT NOTIFICATION
+            notify_gradio_login({
+                "username": username,
+                "email": email,
+                "full_name": full_name or username
+            })
 
-                logging.info(f"✅ Existing Google user logged in: {username}")
-                return True, f"Welcome back, {full_name or username}!"
+            logging.info(f"✅ Firebase user logged in: {username}")
+            return True, f"Welcome back, {full_name or username}!"
 
-            else:
-                # Email registered with traditional method - PREVENT Google registration
-                logging.warning(f"⚠️ Registration blocked: {email} already exists (traditional auth)")
-                return False, (
-                    f"❌ **User Already Exists**\n\n"
-                    f"The email **{email}** is already registered with a password.\n\n"
-                    f"**To access your account:**\n"
-                    f"1. Click the **'Login'** tab above\n"
-                    f"2. Enter your username and password\n\n"
-                    f"💡 *Forgot your password? Contact support for help.*"
-                )
-
-        # ✅ Check if username is taken (different from email check)
-        existing_username = users_collection.find_one({"username": username})
-        if existing_username:
-            # Generate a unique username by appending numbers
-            base_username = username
-            counter = 1
-            while users_collection.find_one({"username": f"{base_username}{counter}"}):
-                counter += 1
-            username = f"{base_username}{counter}"
-            logging.info(f"Username {base_username} taken, using {username} instead")
-
-        # ✅ NEW USER - Create account
-        try:
+        else:
+            # Register new user
             new_user = {
                 "username": username,
                 "email": email,
@@ -722,22 +734,20 @@ def register_or_login_firebase_user(user_info):
             current_user["email"] = email
             current_user["full_name"] = full_name
 
-            logging.info(f"✅ New Google user registered: {username}")
-            return True, f"🎉 Welcome to All Mind, {full_name or username}!"
+            # ✅ INSTANT NOTIFICATION
+            notify_gradio_login({
+                "username": username,
+                "email": email,
+                "full_name": full_name or username
+            })
 
-        except DuplicateKeyError as e:
-            # Handle race condition (extremely rare)
-            error_field = "email" if "email" in str(e) else "username"
-            logging.error(f"⚠️ Duplicate key error on {error_field}: {email}")
-            return False, (
-                f"❌ **Registration Failed**\n\n"
-                f"This {error_field} was just registered by another session.\n\n"
-                f"Please try logging in instead, or use a different {error_field}."
-            )
+            logging.info(f"✅ New Firebase user registered: {username}")
+            return True, f"Welcome to Manjula AI, {full_name or username}!"
 
     except Exception as e:
         logging.error(f"Firebase registration/login failed: {e}")
-        return False, f"❌ Authentication failed: {str(e)}"
+        return False, f"Authentication failed: {str(e)}"
+
 
 def request_otp(username, password, email, fullname):
     """Send OTP to email for registration"""
@@ -762,59 +772,26 @@ def request_otp(username, password, email, fullname):
             gr.update(visible=False)
         )
 
-    # ✅ FIXED: Normalize email and username to lowercase
-    email = email.lower().strip()
-    username = username.lower().strip()
-
     # Check if user already exists
     if MONGODB_AVAILABLE:
         try:
-            # ✅ Check for existing username
-            existing_user = users_collection.find_one({"username": username})
+            existing_user = users_collection.find_one({"username": username.lower().strip()})
             if existing_user:
                 return (
-                    f"❌ **Username Already Taken**\n\n"
-                    f"The username **'{username}'** is already registered.\n\n"
-                    f"**Options:**\n"
-                    f"1. Try a different username\n"
-                    f"2. If this is your account, use the **Login** tab instead",
+                    f"**Error:** Username '{username}' is already taken!",
                     gr.update(visible=False),
                     gr.update(visible=False)
                 )
 
-            # ✅ Check for existing email
-            existing_email = users_collection.find_one({"email": email})
+            existing_email = users_collection.find_one({"email": email.lower().strip()})
             if existing_email:
-                auth_provider = existing_email.get("auth_provider", "email")
-                if auth_provider == "google":
-                    return (
-                        f"❌ **Email Already Registered with Google**\n\n"
-                        f"The email **{email}** is already registered using Google Sign-In.\n\n"
-                        f"**To access your account:**\n"
-                        f"1. Click the **'Login'** tab\n"
-                        f"2. Use **'Continue with Google'** button\n"
-                        f"3. Sign in with the same Google account",
-                        gr.update(visible=False),
-                        gr.update(visible=False)
-                    )
-                else:
-                    return (
-                        f"❌ **Email Already Registered**\n\n"
-                        f"The email **{email}** is already registered.\n\n"
-                        f"**To access your account:**\n"
-                        f"1. Click the **'Login'** tab\n"
-                        f"2. Enter your username and password\n\n"
-                        f"💡 *Forgot your password? Contact support for help.*",
-                        gr.update(visible=False),
-                        gr.update(visible=False)
-                    )
+                return (
+                    f"**Error:** Email '{email}' is already registered!",
+                    gr.update(visible=False),
+                    gr.update(visible=False)
+                )
         except Exception as e:
             logging.error(f"Database check error: {e}")
-            return (
-                f"**Error:** Database error occurred. Please try again.\n\n{str(e)}",
-                gr.update(visible=False),
-                gr.update(visible=False)
-            )
 
     # Generate 6-digit OTP
     otp = ''.join(random.choices(string.digits, k=6))
@@ -1096,16 +1073,16 @@ firebase_config = {
 
 firebase_config_json = json.dumps(firebase_config)
 
-register_html = f"""
+
+register_html = """
 <div style="padding: 20px; text-align: center;">
     <style>
-        .google-signin-btn {{
+        .google-signin-btn {
             background-color: #4285f4;
-            color: white !important;
+            color: white;
             border: none;
             padding: 12px 24px;
             font-size: 16px;
-            font-weight: 500;
             border-radius: 8px;
             cursor: pointer;
             display: inline-flex;
@@ -1114,36 +1091,39 @@ register_html = f"""
             transition: all 0.3s;
             margin: 10px auto;
             text-decoration: none;
-        }}
-        .google-signin-btn:hover {{
+        }
+        .google-signin-btn:hover {
             background-color: #357ae8;
-            color: white !important;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(66, 133, 244, 0.4);
-        }}
+        }
     </style>
 
-    <a href="/firebase-auth?action=register" target="_blank" class="google-signin-btn">
+    <a href="http://127.0.0.1:5000/firebase-auth" target="_blank" class="google-signin-btn">
         <svg width="18" height="18" viewBox="0 0 48 48">
             <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
             <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
             <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
             <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
         </svg>
-        <span style="color: white;">Continue with Google</span>
+        Continue with Google
     </a>
+
+    <p style="margin-top: 10px; font-size: 12px; color: #666;">
+        Opens Firebase authentication in a new window
+    </p>
 </div>
 """
-login_html = f"""
+
+login_html = """
 <div style="padding: 20px; text-align: center;">
     <style>
-        .google-signin-btn {{
+        .google-signin-btn {
             background-color: #4285f4;
-            color: white !important;
+            color: white;
             border: none;
             padding: 12px 24px;
             font-size: 16px;
-            font-weight: 500;
             border-radius: 8px;
             cursor: pointer;
             display: inline-flex;
@@ -1152,165 +1132,29 @@ login_html = f"""
             transition: all 0.3s;
             margin: 10px auto;
             text-decoration: none;
-        }}
-        .google-signin-btn:hover {{
+        }
+        .google-signin-btn:hover {
             background-color: #357ae8;
-            color: white !important;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(66, 133, 244, 0.4);
-        }}
+        }
     </style>
 
-    <a href="/firebase-auth?action=login" target="_blank" class="google-signin-btn">
+    <a href="http://127.0.0.1:5000/firebase-auth" target="_blank" class="google-signin-btn">
         <svg width="18" height="18" viewBox="0 0 48 48">
             <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
             <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
             <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
             <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
         </svg>
-        <span style="color: white;">Continue with Google</span>
+        Continue with Google
     </a>
+
+    <p style="margin-top: 10px; font-size: 12px; color: #666;">
+        Opens Firebase authentication in a new window
+    </p>
 </div>
 """
-
-# ================================
-# FIREBASE LOGIN HANDLER - Returns 16 outputs like login_user()
-# ================================
-
-def login_firebase_user(user_info):
-    """
-    Login user from Firebase authentication - checks if user is registered
-    Returns same 16 outputs as login_user() for Gradio UI update
-    """
-    global current_session_id, guest_chat_count
-
-    # === 1. MONGODB NOT AVAILABLE (Fallback) ===
-    if not MONGODB_AVAILABLE:
-        current_session_id += 1
-        clear_guest_history()
-        guest_chat_count = 0
-
-        username = user_info["email"].split("@")[0]
-        current_user["username"] = username
-        current_user["logged_in"] = True
-        current_user["is_guest"] = False
-        current_user["email"] = user_info["email"]
-        current_user["full_name"] = user_info.get("name", "")
-
-        return (
-            f"**Welcome back, {username}!**\n\nYou have full access to all features!",
-            gr.update(visible=False),  # auth_section
-            gr.update(visible=True),  # main_app
-            f"**Logged in as:** {username}",
-            gr.update(visible=True),  # file_qa_tab
-            gr.update(visible=True),  # image_gen_tab
-            gr.update(visible=True),  # image_qa_tab
-            gr.update(visible=True),  # image_search_tab
-            gr.update(visible=True),  # video_gen_tab
-            gr.update(visible=True),  # translation_tab
-            gr.update(visible=True),  # stats_btn
-            [],  # history_chatbot
-            gr.update(visible=False),  # guest_chat_warning
-            [],  # chatbot
-            current_session_id,  # session_id
-            None  # mic_chat
-        )
-
-    # === 2. CHECK IF USER EXISTS ===
-    try:
-        email = user_info["email"]
-        existing_user = users_collection.find_one({"email": email})
-
-        if not existing_user:
-            # User not registered - return error state
-            logging.warning(f"⚠️ Login attempt with unregistered email: {email}")
-            error_msg = (
-                f"❌ **Account Not Found**\n\n"
-                f"The email **{email}** is not registered.\n\n"
-                f"**Please register first:**\n"
-                f"1. Click the **'Register'** tab above\n"
-                f"2. Use **'Continue with Google'** button\n"
-                f"3. Sign in with the same Google account\n\n"
-                f"Registration takes less than 30 seconds! 🚀"
-            )
-
-            return (
-                error_msg,  # login_status
-                gr.update(visible=True),  # auth_section
-                gr.update(visible=False),  # main_app
-                "**Not logged in**",  # user_info
-                gr.update(visible=False),  # file_qa_tab
-                gr.update(visible=False),  # image_gen_tab
-                gr.update(visible=False),  # image_qa_tab
-                gr.update(visible=False),  # image_search_tab
-                gr.update(visible=False),  # video_gen_tab
-                gr.update(visible=False),  # translation_tab
-                gr.update(visible=False),  # stats_btn
-                [],  # history_chatbot
-                gr.update(visible=False),  # guest_chat_warning
-                [],  # chatbot
-                current_session_id,  # session_id
-                None  # mic_chat
-            )
-
-        # === 3. VALID LOGIN - USER EXISTS ===
-        clear_guest_history()
-        guest_chat_count = 0
-        current_session_id += 1
-
-        users_collection.update_one(
-            {"email": email},
-            {"$set": {"last_login": datetime.now()}}
-        )
-
-        current_user["username"] = existing_user["username"]
-        current_user["logged_in"] = True
-        current_user["is_guest"] = False
-        current_user["email"] = email
-        current_user["full_name"] = existing_user.get("full_name", user_info.get("name", ""))
-
-        logging.info(f"✅ Firebase user logged in: {existing_user['username']} | Session ID: {current_session_id}")
-
-        return (
-            f"**✅ Welcome back, {current_user['full_name'] or current_user['username']}!**\n\nYou have full access to all features!",
-            gr.update(visible=False),  # auth_section
-            gr.update(visible=True),  # main_app
-            f"**Logged in as:** {current_user['username']}",
-            gr.update(visible=True),  # file_qa_tab
-            gr.update(visible=True),  # image_gen_tab
-            gr.update(visible=True),  # image_qa_tab
-            gr.update(visible=True),  # image_search_tab
-            gr.update(visible=True),  # video_gen_tab
-            gr.update(visible=True),  # translation_tab
-            gr.update(visible=True),  # stats_btn
-            [],  # history_chatbot
-            gr.update(visible=False),  # guest_chat_warning
-            [],  # chatbot
-            current_session_id,  # session_id
-            None  # mic_chat
-        )
-
-    except Exception as e:
-        logging.error(f"Firebase login failed: {e}")
-        return (
-            f"**Login failed:** {str(e)}",
-            gr.update(visible=True),  # auth_section
-            gr.update(visible=False),  # main_app
-            "**Not logged in**",
-            gr.update(visible=False),  # file_qa_tab
-            gr.update(visible=False),  # image_gen_tab
-            gr.update(visible=False),  # image_qa_tab
-            gr.update(visible=False),  # image_search_tab
-            gr.update(visible=False),  # video_gen_tab
-            gr.update(visible=False),  # translation_tab
-            gr.update(visible=False),  # stats_btn
-            [],  # history_chatbot
-            gr.update(visible=True),  # guest_chat_warning
-            [],  # chatbot
-            current_session_id,  # session_id
-            None  # mic_chat
-        )
-
 def login_user(username, password):
     """Login user - FIXED with complete session isolation & 16 outputs"""
     global current_session_id, guest_chat_count
@@ -1686,29 +1530,8 @@ def get_user_stats():
 
 
 
-# ============================================================================
-# ENHANCED API CONFIGURATION WITH MULTIPLE FALLBACKS
-# ============================================================================
-GEMINI_API_KEY_1 = os.getenv("GEMINI_API_KEY")  # Primary
-GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")  # Backup 1
-GEMINI_API_KEY_3 = os.getenv("GEMINI_API_KEY_3")  # Backup 2
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-COHERE_API_KEY = os.getenv("COHERE_API_KEY")
-
-# Initialize multiple Gemini clients
-GEMINI_CLIENTS = []
-for key in [GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3]:
-    if key:
-        try:
-            import google.generativeai as genai_temp
-            genai_temp.configure(api_key=key)
-            GEMINI_CLIENTS.append(genai_temp)
-            logging.info(f"✅ Gemini client initialized (API key #{len(GEMINI_CLIENTS)})")
-        except Exception as e:
-            logging.warning(f"Failed to initialize Gemini client: {e}")
-
-GEMINI_CLIENT = GEMINI_CLIENTS[0] if GEMINI_CLIENTS else None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_CLIENT = None
 
 if GEMINI_API_KEY:
     try:
@@ -1929,13 +1752,19 @@ def check_guest_feature_access(feature_name):
 
 
 def query_model(prompt, history, session_id_state):
-    """Chat function with MULTIPLE API fallbacks - NO RATE LIMITS!"""
-    global current_session_id, GEMINI_CLIENTS
+    """Chat function with COMPLETE session isolation"""
+    global current_session_id
 
+    # ✅ CRITICAL: Validate session ID matches current session
     if session_id_state != current_session_id:
-        logging.warning(f"⚠️ Session mismatch detected! Clearing stale history.")
+        logging.warning(f"⚠️ Session mismatch detected! Clearing stale history. "
+                        f"Expected: {current_session_id}, Got: {session_id_state}")
         history = []
         session_id_state = current_session_id
+
+    logging.info(f"📥 query_model | User: {current_user.get('username', 'Unknown')} | "
+                 f"Guest: {current_user.get('is_guest')} | History len: {len(history)} | "
+                 f"Session: {session_id_state} | Current: {current_session_id}")
 
     if not prompt or not prompt.strip():
         return history, "", session_id_state
@@ -1945,7 +1774,10 @@ def query_model(prompt, history, session_id_state):
         history.append((prompt, limit_check))
         return history, "", session_id_state
 
-    # REMOVED rate limit check - we have fallbacks now!
+    limit_msg = check_rate_limit("text_qa")
+    if limit_msg:
+        history.append((prompt, limit_msg))
+        return history, "", session_id_state
 
     global guest_chat_count
     if current_user["is_guest"]:
@@ -1962,52 +1794,38 @@ def query_model(prompt, history, session_id_state):
 
     llm_messages.append({"role": "user", "content": prompt})
 
-    answer = None
+    answer = "Error: No LLM client configured."
     llm_name = "N/A"
 
-    # ============================================================
-    # METHOD 1: Try all Gemini API keys
-    # ============================================================
-    for idx, gemini_client in enumerate(GEMINI_CLIENTS, 1):
-        if answer:
-            break
-
+    if GEMINI_CLIENT:
+        llm_name = "Gemini"
         try:
-            llm_name = f"Gemini (Key #{idx})"
-            logging.info(f"🔄 Trying {llm_name}...")
-
             gemini_formatted_messages = []
             for msg in llm_messages:
                 role = "model" if msg["role"] == "assistant" else msg["role"]
-                gemini_formatted_messages.append({
-                    "role": role,
-                    "parts": [{"text": msg["content"]}],
-                })
+                gemini_formatted_messages.append(
+                    {
+                        "role": role,
+                        "parts": [{"text": msg["content"]}],
+                    }
+                )
 
-            model = gemini_client.GenerativeModel('gemini-2.0-flash-exp')
+            model = GEMINI_CLIENT.GenerativeModel('gemini-2.0-flash-exp')
             response = model.generate_content(gemini_formatted_messages)
-
-            if response and response.text:
-                answer = response.text
-                logging.info(f"✅ Success with {llm_name}")
-                break
+            answer = response.text
 
         except Exception as e:
-            error_str = str(e).lower()
-            if "429" in error_str or "quota" in error_str:
-                logging.warning(f"⚠️ {llm_name} quota exceeded, trying next...")
+            err_str = str(e).lower()
+            if any(x in err_str for x in ["quota", "unavailable", "429"]):
+                set_rate_limit("text_qa")
+                answer = f"⚠️ Text Q&A: Daily limit reached. Try again after 12 hours."
             else:
-                logging.error(f"❌ {llm_name} error: {e}")
-            continue
+                answer = f"⚠️ Gemini failed: {e}"
+            logging.error(f"Gemini API Error: {e}")
 
-    # ============================================================
-    # METHOD 2: OpenAI GPT-3.5
-    # ============================================================
-    if not answer and OPENAI_KEY:
+    if (answer is None or "Gemini failed" in answer or llm_name == "N/A") and OPENAI_KEY:
+        llm_name = "OpenAI"
         try:
-            llm_name = "OpenAI GPT-3.5"
-            logging.info(f"🔄 Trying {llm_name}...")
-
             client = openai.OpenAI(api_key=OPENAI_KEY)
             openai_formatted_messages = []
             for msg in llm_messages:
@@ -2016,23 +1834,17 @@ def query_model(prompt, history, session_id_state):
 
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
-                messages=openai_formatted_messages,
-                timeout=30
+                messages=openai_formatted_messages
             )
             answer = response.choices[0].message.content.strip()
-            logging.info(f"✅ Success with {llm_name}")
-
         except Exception as e:
-            logging.error(f"❌ {llm_name} error: {e}")
+            answer = f"⚠️ OpenAI failed: {e}"
+            logging.error(f"OpenAI API Error: {e}")
 
-    # ============================================================
-    # METHOD 3: Groq (VERY FAST & FREE)
-    # ============================================================
-    if not answer and GROQ_API_KEY:
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    if (answer is None or "failed" in answer.lower()) and GROQ_API_KEY:
+        llm_name = "Groq"
         try:
-            llm_name = "Groq Llama-3.1"
-            logging.info(f"🔄 Trying {llm_name}...")
-
             groq_messages = []
             for msg in llm_messages:
                 role = "assistant" if msg["role"] == "model" else msg["role"]
@@ -2050,74 +1862,29 @@ def query_model(prompt, history, session_id_state):
                 },
                 timeout=30
             )
-
             if response.status_code == 200:
                 answer = response.json()["choices"][0]["message"]["content"]
-                logging.info(f"✅ Success with {llm_name}")
             else:
-                logging.error(f"❌ {llm_name} status: {response.status_code}")
-
+                answer = f"⚠️ Groq failed: {response.text}"
+                logging.error(f"Groq API Error: {response.status_code} - {response.text}")
         except Exception as e:
-            logging.error(f"❌ {llm_name} error: {e}")
+            answer = f"⚠️ Groq failed: {e}"
+            logging.error(f"Groq API Error: {e}")
 
-    # ============================================================
-    # METHOD 4: Hugging Face (FREE fallback)
-    # ============================================================
-    if not answer and HF_API_KEY:
-        try:
-            llm_name = "HuggingFace Mistral"
-            logging.info(f"🔄 Trying {llm_name}...")
-
-            headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-            hf_models = [
-                "mistralai/Mistral-7B-Instruct-v0.2",
-                "meta-llama/Meta-Llama-3-8B-Instruct"
-            ]
-
-            for model_id in hf_models:
-                try:
-                    response = requests.post(
-                        f"https://api-inference.huggingface.co/models/{model_id}",
-                        headers=headers,
-                        json={"inputs": prompt},
-                        timeout=30
-                    )
-
-                    if response.status_code == 200:
-                        result = response.json()
-                        if isinstance(result, list) and len(result) > 0:
-                            answer = result[0].get("generated_text", "")
-                            if answer:
-                                llm_name = f"HF {model_id.split('/')[-1]}"
-                                logging.info(f"✅ Success with {llm_name}")
-                                break
-                except:
-                    continue
-
-        except Exception as e:
-            logging.error(f"❌ HuggingFace error: {e}")
-
-    # Final fallback message
-    if not answer:
-        answer = (
-            "⚠️ **All AI services are temporarily unavailable.**\n\n"
-            "**Solutions:**\n"
-            "1. Wait 30 seconds and try again\n"
-            "2. Add more API keys to your .env file:\n"
-            "   - `GEMINI_API_KEY_2=your_key` (https://makersuite.google.com/app/apikey)\n"
-            "   - `GROQ_API_KEY=your_key` (https://console.groq.com/keys)\n\n"
-            "💡 With multiple API keys, you'll never see rate limits!"
-        )
-        llm_name = "None"
+    if answer is None or answer.startswith("Error: No LLM client"):
+        answer = "Error: No LLM client configured (Missing GEMINI_API_KEY or OPENAI_API_KEY)."
 
     history.append((prompt, answer))
 
     if current_user["is_guest"]:
         add_to_guest_history("chat", prompt, answer, {"model": llm_name})
+        logging.info(f"💬 Guest chat saved to SESSION ONLY (not in DB) - Model: {llm_name}")
     else:
         save_interaction_to_db("chat", prompt, answer, {"model": llm_name})
+        logging.info(f"💬 User '{current_user['username']}' chat saved to DB - Model: {llm_name}")
 
     return history, "", session_id_state
+
 
 def process_audio_and_chat(audio_filepath, history, session_id_state):
     """Process audio input, transcribe it, and get AI response - WITH SESSION VALIDATION"""
@@ -2221,13 +1988,14 @@ def get_public_ip():
 
 # --- File Content Extraction WITH TIMER ---
 def extract_file_content_gemini(file, prompt):
-    """
-    COMPLETE FILE EXTRACTION WITH ALL API FALLBACKS
-    Order: Gemini (all keys) → Groq → OpenAI Vision → OpenAI GPT-4 → OCR
-    """
+    """FIXED: Extract file content with complete streaming"""
     guest_check = check_guest_feature_access("File Q&A")
     if guest_check:
         yield "🔒 Access Denied", guest_check
+        return
+
+    if not GEMINI_CLIENT:
+        yield "⏱️ 0s", "Error: Gemini API Key missing."
         return
 
     if not file:
@@ -2235,422 +2003,73 @@ def extract_file_content_gemini(file, prompt):
         return
 
     uploaded_file = None
-    start_time = time.time()
-
     try:
-        yield "⏱️ 1s", "⏳ **Step 1:** Uploading file..."
+        start_time = time.time()
+
+        yield "⏱️ 1s", "⏳ **Step 1/3:** Uploading file to Gemini..."
         file_path = file.name
         ext = os.path.splitext(file_path)[-1].lower()
 
         if ext in ['.docx', '.txt']:
-            yield "⏱️ 2s", "Error: Unsupported file type. Please use PDF or images (JPG, PNG)."
+            yield "⏱️ 2s", "Error: Unsupported file type (DOCX/TXT require dedicated parsers)."
             return
 
-        # ============================================================
-        # METHOD 1: Try ALL Gemini API Keys (Primary - Best for documents)
-        # ============================================================
-        for idx, gemini_client in enumerate(GEMINI_CLIENTS, 1):
-            try:
-                logging.info(f"🔄 Trying Gemini API #{idx} for file extraction...")
-                elapsed = int(time.time() - start_time)
-                yield f"⏱️ {elapsed}s", f"⏳ **Step 2/{len(GEMINI_CLIENTS) + 2}:** Processing with Gemini API #{idx}..."
-
-                # Upload file to Gemini
-                uploaded_file = genai.upload_file(path=file_path)
-
-                extraction_prompt = (
-                    f"Analyze the attached document/image thoroughly. Extract ALL text, tables, "
-                    f"charts, and key data. Format the output as clean Markdown with proper headers. "
-                    f"User's specific request: '{prompt}'"
-                )
-
-                contents = [uploaded_file, extraction_prompt]
-                model = gemini_client.GenerativeModel('gemini-2.0-flash-exp')
-                response = model.generate_content(contents)
-
-                if response and response.text:
-                    elapsed = int(time.time() - start_time)
-                    final_result = f"**✅ Extraction Complete! (took {elapsed}s)**\n\n**Service:** Gemini API #{idx}\n\n---\n\n{response.text}"
-
-                    # Cleanup
-                    try:
-                        genai.delete_file(name=uploaded_file.name)
-                        logging.info(f"✅ File cleaned up from Gemini")
-                    except:
-                        pass
-
-                    yield f"⏱️ {elapsed}s ✅", final_result
-                    return
-
-            except Exception as e:
-                error_str = str(e).lower()
-                if "429" in error_str or "quota" in error_str or "resource exhausted" in error_str:
-                    logging.warning(f"⚠️ Gemini #{idx} quota exceeded, trying next API...")
-                else:
-                    logging.error(f"❌ Gemini #{idx} error: {e}")
-
-                # Cleanup on error
-                if uploaded_file and hasattr(uploaded_file, 'name'):
-                    try:
-                        genai.delete_file(name=uploaded_file.name)
-                    except:
-                        pass
-                uploaded_file = None
-                continue
-
-        # All Gemini keys failed - proceed to next method
-        elapsed = int(time.time() - start_time)
-        yield f"⏱️ {elapsed}s", f"⏳ All {len(GEMINI_CLIENTS)} Gemini keys exhausted. Trying Groq..."
-
-        # ============================================================
-        # METHOD 2: Groq API (Fast & Free - Works with extracted text)
-        # ============================================================
-        if GROQ_API_KEY:
-            try:
-                logging.info("🔄 Trying Groq API for file extraction...")
-                elapsed = int(time.time() - start_time)
-                yield f"⏱️ {elapsed}s", "⏳ **Fallback 1:** Extracting with Groq AI..."
-
-                # First, extract raw text from file
-                extracted_text = ""
-
-                # For images - use OCR
-                if ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                    try:
-                        import pytesseract
-                        from PIL import Image
-                        img = Image.open(file_path)
-                        extracted_text = pytesseract.image_to_string(img)
-                        logging.info(f"✅ OCR extracted {len(extracted_text)} characters from image")
-                    except ImportError:
-                        logging.warning("⚠️ pytesseract not installed. Install with: pip install pytesseract")
-                    except Exception as ocr_error:
-                        logging.warning(f"⚠️ OCR failed: {ocr_error}")
-
-                # For PDFs - extract text
-                elif ext == '.pdf':
-                    try:
-                        import PyPDF2
-                        with open(file_path, 'rb') as pdf_file:
-                            pdf_reader = PyPDF2.PdfReader(pdf_file)
-                            for page in pdf_reader.pages:
-                                extracted_text += page.extract_text() + "\n\n"
-                        logging.info(f"✅ Extracted {len(extracted_text)} characters from PDF")
-                    except ImportError:
-                        logging.warning("⚠️ PyPDF2 not installed. Install with: pip install PyPDF2")
-                    except Exception as pdf_error:
-                        logging.warning(f"⚠️ PDF extraction failed: {pdf_error}")
-
-                # If we successfully extracted text, analyze with Groq
-                if extracted_text.strip():
-                    groq_prompt = f"""You are a document analysis expert. Analyze this extracted content and provide a comprehensive response.
-
-**Extracted Content:**
-{extracted_text[:6000]}  # Limit for API
-
-**User's Request:** {prompt}
-
-**Instructions:**
-- Extract key information
-- Format as clean Markdown
-- Be comprehensive and accurate
-- Address the user's specific request"""
-
-                    response = requests.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {GROQ_API_KEY}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "llama-3.1-8b-instant",
-                            "messages": [{"role": "user", "content": groq_prompt}],
-                            "max_tokens": 3000,
-                            "temperature": 0.3
-                        },
-                        timeout=45
-                    )
-
-                    if response.status_code == 200:
-                        result = response.json()["choices"][0]["message"]["content"]
-                        elapsed = int(time.time() - start_time)
-                        final_result = f"**✅ Extraction Complete! (took {elapsed}s)**\n\n**Service:** Groq AI (Llama 3.1)\n\n---\n\n{result}"
-                        yield f"⏱️ {elapsed}s ✅", final_result
-                        return
-                    else:
-                        logging.warning(f"⚠️ Groq API returned status {response.status_code}")
-                else:
-                    logging.warning("⚠️ No text extracted for Groq to analyze")
-
-            except Exception as e:
-                logging.error(f"❌ Groq API error: {e}")
-
-        # Groq failed - proceed to OpenAI
-        elapsed = int(time.time() - start_time)
-        yield f"⏱️ {elapsed}s", "⏳ Groq unavailable. Trying OpenAI Vision..."
-
-        # ============================================================
-        # METHOD 3: OpenAI Vision API (Premium - Best for images)
-        # ============================================================
-        if OPENAI_KEY and ext in ['.jpg', '.jpeg', '.png', '.webp']:
-            try:
-                logging.info("🔄 Trying OpenAI Vision API...")
-                elapsed = int(time.time() - start_time)
-                yield f"⏱️ {elapsed}s", "⏳ **Fallback 2:** Processing with OpenAI Vision..."
-
-                import base64
-                with open(file_path, "rb") as f:
-                    file_data = base64.b64encode(f.read()).decode('utf-8')
-
-                client = openai.OpenAI(api_key=OPENAI_KEY)
-
-                mime_types = {
-                    '.jpg': 'image/jpeg',
-                    '.jpeg': 'image/jpeg',
-                    '.png': 'image/png',
-                    '.webp': 'image/webp'
-                }
-                mime_type = mime_types.get(ext, 'image/jpeg')
-
-                response = client.chat.completions.create(
-                    model="gpt-4-vision-preview",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"Analyze this image/document thoroughly. Extract all text, data, and information. Format as Markdown. User's request: {prompt}"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime_type};base64,{file_data}",
-                                    "detail": "high"
-                                }
-                            }
-                        ]
-                    }],
-                    max_tokens=4096
-                )
-
-                result = response.choices[0].message.content
-                elapsed = int(time.time() - start_time)
-                final_result = f"**✅ Extraction Complete! (took {elapsed}s)**\n\n**Service:** OpenAI Vision (GPT-4V)\n\n---\n\n{result}"
-                yield f"⏱️ {elapsed}s ✅", final_result
-                return
-
-            except Exception as e:
-                logging.error(f"❌ OpenAI Vision error: {e}")
-
-        # OpenAI Vision failed - try GPT-4 with text extraction
-        elapsed = int(time.time() - start_time)
-        yield f"⏱️ {elapsed}s", "⏳ OpenAI Vision unavailable. Trying GPT-4 with text extraction..."
-
-        # ============================================================
-        # METHOD 4: OpenAI GPT-4 with Text Extraction
-        # ============================================================
-        if OPENAI_KEY:
-            try:
-                logging.info("🔄 Trying OpenAI GPT-4 with text extraction...")
-                elapsed = int(time.time() - start_time)
-                yield f"⏱️ {elapsed}s", "⏳ **Fallback 3:** Extracting text + GPT-4 analysis..."
-
-                # Extract text content
-                file_content = ""
-
-                # For PDFs
-                if ext == '.pdf':
-                    try:
-                        import PyPDF2
-                        with open(file_path, 'rb') as pdf_file:
-                            pdf_reader = PyPDF2.PdfReader(pdf_file)
-                            for page in pdf_reader.pages:
-                                file_content += page.extract_text() + "\n\n"
-                        logging.info(f"✅ Extracted {len(file_content)} chars from PDF")
-                    except Exception as pdf_error:
-                        logging.warning(f"PDF extraction failed: {pdf_error}")
-
-                # For images
-                elif ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                    try:
-                        import pytesseract
-                        from PIL import Image
-                        img = Image.open(file_path)
-                        file_content = pytesseract.image_to_string(img)
-                        logging.info(f"✅ OCR extracted {len(file_content)} chars")
-                    except Exception as ocr_error:
-                        logging.warning(f"OCR failed: {ocr_error}")
-
-                # If we have content, analyze with GPT-4
-                if file_content.strip():
-                    client = openai.OpenAI(api_key=OPENAI_KEY)
-
-                    analysis_prompt = f"""Analyze this extracted document content and provide a comprehensive response.
-
-**Extracted Content:**
-{file_content[:10000]}
-
-**User's Request:** {prompt}
-
-**Instructions:**
-- Provide detailed analysis
-- Format as clean Markdown
-- Address the user's specific request"""
-
-                    response = client.chat.completions.create(
-                        model="gpt-4",
-                        messages=[{"role": "user", "content": analysis_prompt}],
-                        max_tokens=3000
-                    )
-
-                    result = response.choices[0].message.content
-                    elapsed = int(time.time() - start_time)
-                    final_result = f"**✅ Extraction Complete! (took {elapsed}s)**\n\n**Service:** OpenAI GPT-4 + Text Extraction\n\n---\n\n{result}"
-                    yield f"⏱️ {elapsed}s ✅", final_result
-                    return
-
-            except Exception as e:
-                logging.error(f"❌ OpenAI GPT-4 error: {e}")
-
-        # ============================================================
-        # METHOD 5: Basic OCR Fallback (No AI analysis)
-        # ============================================================
-        if ext in ['.jpg', '.jpeg', '.png', '.webp']:
-            try:
-                logging.info("🔄 Trying basic OCR extraction...")
-                elapsed = int(time.time() - start_time)
-                yield f"⏱️ {elapsed}s", "⏳ **Final Fallback:** Basic OCR extraction..."
-
-                import pytesseract
-                from PIL import Image
-
-                img = Image.open(file_path)
-                text = pytesseract.image_to_string(img)
-
-                if text.strip():
-                    elapsed = int(time.time() - start_time)
-                    final_result = f"""**✅ Text Extracted! (took {elapsed}s)**
-
-**Service:** Basic OCR (Tesseract)
-
-**⚠️ Note:** This is raw OCR output without AI analysis. For better results:
-1. Add more Gemini API keys: https://makersuite.google.com/app/apikey
-2. Get Groq API key: https://console.groq.com/keys
-3. Add OpenAI API key for premium analysis
-
----
-
-**Extracted Text:**
-
-{text}"""
-                    yield f"⏱️ {elapsed}s ✅", final_result
-                    return
-
-            except ImportError:
-                logging.warning("⚠️ pytesseract not installed")
-            except Exception as e:
-                logging.error(f"❌ OCR extraction error: {e}")
-
-        # ============================================================
-        # ALL METHODS FAILED - Show comprehensive error
-        # ============================================================
+        uploaded_file = genai.upload_file(path=file_path)
         elapsed = int(time.time() - start_time)
 
-        # Detailed status of what failed
-        failure_report = []
-        if len(GEMINI_CLIENTS) > 0:
-            failure_report.append(f"❌ {len(GEMINI_CLIENTS)} Gemini API key(s) - quota exceeded")
+        yield f"⏱️ {elapsed}s", "⏳ **Step 2/3:** Processing file..."
+        time.sleep(2)
+
+        elapsed = int(time.time() - start_time)
+        yield f"⏱️ {elapsed}s", "⏳ **Step 3/3:** Extracting content with AI..."
+
+        extraction_prompt = (
+            f"Analyze the attached document/image. Extract all text, tables, "
+            f"and key data. Format as clean Markdown. Address: '{prompt}'"
+        )
+
+        contents = [uploaded_file, extraction_prompt]
+
+        model = GEMINI_CLIENT.GenerativeModel('gemini-2.0-flash-exp')
+        response = model.generate_content(contents)
+
+
+        elapsed = int(time.time() - start_time)
+
+        if response and response.text:
+            final_result = f"**✅ Extraction Complete! (took {elapsed}s)**\n\n{response.text}"
+            yield f"⏱️ {elapsed}s ✅", final_result
         else:
-            failure_report.append("⚠️ No Gemini API keys configured")
-
-        if GROQ_API_KEY:
-            failure_report.append("❌ Groq API - failed or no text extracted")
-        else:
-            failure_report.append("⚠️ No Groq API key configured")
-
-        if OPENAI_KEY:
-            failure_report.append("❌ OpenAI APIs - failed")
-        else:
-            failure_report.append("⚠️ No OpenAI API key configured")
-
-        error_msg = f"""⚠️ **All file extraction services temporarily unavailable**
-
-**Attempted Services ({elapsed}s):**
-{chr(10).join(failure_report)}
-
----
-
-**🔧 SOLUTIONS TO FIX THIS:**
-
-**Option 1: Add More FREE Gemini Keys (5 min - RECOMMENDED)**
-→ Get 2-3 more keys at: https://makersuite.google.com/app/apikey
-→ Add to .env:
-```
-GEMINI_API_KEY_2=AIzaSy...your_key
-GEMINI_API_KEY_3=AIzaSy...your_key
-```
-→ Each key = 1,500 requests/day
-
-**Option 2: Add FREE Groq API (2 min - FAST)**
-→ Get key at: https://console.groq.com/keys
-→ Add to .env:
-```
-GROQ_API_KEY=gsk_...your_key
-```
-→ Unlimited requests (rate limited but generous)
-
-**Option 3: Add OpenAI API (Premium)**
-→ Get key at: https://platform.openai.com/api-keys
-→ Add to .env:
-```
-OPENAI_API_KEY=sk-...your_key
-```
-
-**Option 4: Install OCR for basic extraction**
-```bash
-pip install pytesseract
-pip install PyPDF2
-```
-
-**Option 5: Wait 60 seconds**
-→ Gemini quotas reset per minute
-→ Try uploading again
-
----
-
-**Current Configuration:**
-- Gemini keys: {len(GEMINI_CLIENTS)}/3
-- Groq API: {'✅ Configured' if GROQ_API_KEY else '❌ Missing'}
-- OpenAI API: {'✅ Configured' if OPENAI_KEY else '❌ Missing'}
-
-**💡 With 3 Gemini keys + Groq, you get ~5,000 FREE extractions/day!**
-"""
-        yield f"⏱️ {elapsed}s ❌", error_msg
+            yield f"⏱️ {elapsed}s", "Empty extraction result from Gemini."
 
     except Exception as e:
         elapsed = int(time.time() - start_time)
-        logging.error(f"File extraction critical error: {e}")
-        import traceback
-        traceback.print_exc()
-        yield f"⏱️ {elapsed}s ❌", f"**Critical Error:** {str(e)}\n\nPlease check logs for details."
+        error_msg = str(e)
+        logging.error(f"File extraction error: {error_msg}")
+        yield f"⏱️ {elapsed}s ❌", f"Extraction failed: {error_msg}"
 
     finally:
-        # Final cleanup of any remaining uploaded files
-        if uploaded_file and hasattr(uploaded_file, 'name'):
+        # Cleanup uploaded file
+        if uploaded_file and hasattr(uploaded_file, 'name') and uploaded_file.name:
             try:
+                time.sleep(1)
                 genai.delete_file(name=uploaded_file.name)
-                logging.info(f"✅ Final cleanup: File deleted from Gemini")
+                logging.info(f"✅ Cleaned up file: {uploaded_file.name}")
             except Exception as cleanup_error:
-                logging.debug(f"Cleanup note: {cleanup_error}")
+                logging.warning(f"File cleanup warning: {cleanup_error}")
+
+
 
 def answer_question_from_content(file_content, user_question):
-    """Use multiple LLMs to answer questions about file content"""
+    """Use LLM to answer user's question based on extracted file content"""
+    if not GEMINI_CLIENT and not OPENAI_KEY:
+        return f"**Extracted Content:**\n\n{file_content}\n\n---\n\n⚠️ No LLM available to answer your question. Please configure GEMINI_API_KEY or OPENAI_API_KEY."
 
     max_content_length = 30000
     if len(file_content) > max_content_length:
-        file_content = file_content[:max_content_length] + "\n\n[Content truncated...]"
+        file_content = file_content[:max_content_length] + "\n\n[Content truncated due to length...]"
 
-    system_prompt = f"""You are a highly capable AI assistant.
+    system_prompt = f"""You are a highly capable AI assistant. A user has uploaded a file and wants your help.
 
 **File Content:**
 {file_content}
@@ -2658,60 +2077,51 @@ def answer_question_from_content(file_content, user_question):
 **User's Request:**
 {user_question}
 
-Provide a helpful response based on the file content."""
+Instructions:
+- The user can ask you to do ANYTHING with this file content - be completely flexible and helpful.
+- Understand what the user is asking for and provide exactly that.
+- If you're unsure what they want, ask for clarification while still providing your best interpretation.
 
-    # Try all Gemini clients
-    for idx, gemini_client in enumerate(GEMINI_CLIENTS, 1):
+Now, based on the user's request above, provide the most helpful and appropriate response."""
+
+    answer = None
+    llm_name = "N/A"
+
+    if GEMINI_CLIENT:
+        llm_name = "Gemini"
         try:
-            logging.info(f"🔄 Trying Gemini #{idx} for file Q&A...")
-            model = gemini_client.GenerativeModel('gemini-2.0-flash-exp')
+            model = GEMINI_CLIENT.GenerativeModel('gemini-2.0-flash-exp')
             response = model.generate_content(system_prompt)
 
             if response and response.text:
-                return f"**Response:**\n\n{response.text}\n\n---\n**Source:** Gemini #{idx}"
+                answer = response.text
         except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower():
-                continue
-            else:
-                logging.error(f"Gemini #{idx} error: {e}")
-                continue
+            logging.error(f"Gemini API Error in File Q&A: {e}")
+            answer = None
 
-    # Try OpenAI
-    if OPENAI_KEY:
+    if (answer is None or "failed" in str(answer).lower()) and OPENAI_KEY:
+        llm_name = "OpenAI"
         try:
-            logging.info("🔄 Trying OpenAI...")
             client = openai.OpenAI(api_key=OPENAI_KEY)
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": system_prompt}],
+                messages=[
+                    {"role": "system",
+                     "content": "You are a helpful AI assistant that can do anything the user requests with uploaded file content."},
+                    {"role": "user", "content": system_prompt}
+                ],
                 timeout=60
             )
             answer = response.choices[0].message.content.strip()
-            return f"**Response:**\n\n{answer}\n\n---\n**Source:** OpenAI"
         except Exception as e:
-            logging.error(f"OpenAI error: {e}")
+            logging.error(f"OpenAI API Error in File Q&A: {e}")
+            answer = None
 
-    # Try Groq
-    if GROQ_API_KEY:
-        try:
-            logging.info("🔄 Trying Groq...")
-            response = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": system_prompt}]},
-                timeout=60
-            )
+    if answer is None or not answer.strip():
+        return f"**Extracted Content:**\n\n{file_content}\n\n---\n\n⚠️ Unable to process your question with AI. Here's the extracted content for your review."
 
-            if response.status_code == 200:
-                answer = response.json()["choices"][0]["message"]["content"]
-                return f"**Response:**\n\n{answer}\n\n---\n**Source:** Groq"
-        except Exception as e:
-            logging.error(f"Groq error: {e}")
+    return f"**Response to your request:**\n\n{answer}\n\n---\n\n**Source:** Based on content from uploaded file (processed by {llm_name})"
 
-    return (
-        f"**Extracted Content:**\n\n{file_content}\n\n---\n\n"
-        f"⚠️ All AI services unavailable. Add more API keys to your .env file."
-    )
 
 def file_question_answer(file, question):
     """FIXED: File Q&A with proper generator handling"""
@@ -2992,63 +2402,60 @@ def process_audio_for_image_gen(audio_filepath):
 
 # --- Image QA ---
 def query_image_model(image, prompt):
-    """Image Q&A with MULTIPLE API fallbacks"""
+    """FIXED: Image Q&A with history saving"""
     guest_check = check_guest_feature_access("Image Q&A")
     if guest_check:
         return guest_check
 
+    access_check = check_feature_access("image_qa")
+    if access_check:
+        return access_check
+
+    limit_msg = check_rate_limit("image_qa")
+    if limit_msg:
+        return limit_msg
+
     if image is None:
         return "Error: Please upload an image first."
 
+    if not GEMINI_CLIENT:
+        return "Error: Gemini API Key missing."
+
     increment_usage("image_qa")
 
-    # ============================================================
-    # Try all Gemini APIs
-    # ============================================================
-    for idx, gemini_client in enumerate(GEMINI_CLIENTS, 1):
-        try:
-            logging.info(f"🔄 Trying Gemini #{idx} for image Q&A...")
+    try:
+        resized_image = image.copy()
+        resized_image.thumbnail((512, 512), Resampling.LANCZOS)
 
-            resized_image = image.copy()
-            resized_image.thumbnail((512, 512), Resampling.LANCZOS)
+        img_byte_arr = io.BytesIO()
+        resized_image.save(img_byte_arr, format='JPEG')
+        img_byte_arr.seek(0)
 
-            contents = [resized_image, prompt]
-            model = gemini_client.GenerativeModel('gemini-2.0-flash-exp')
-            response = model.generate_content(contents)
+        image_part = {
+            "mime_type": "image/jpeg",
+            "data": img_byte_arr.getvalue(),
+        }
+        contents = [resized_image, prompt]  # Gemini accepts PIL Image objects directly
+        model = GEMINI_CLIENT.GenerativeModel('gemini-2.0-flash-exp')
+        response = model.generate_content(contents)
 
-            if response and response.text:
-                result = response.text
+        result = response.text
 
-                if current_user["is_guest"]:
-                    add_to_guest_history("image_qa", prompt, result, {"model": f"Gemini #{idx}"})
-                else:
-                    save_interaction_to_db("image_qa", prompt, result, {"model": f"Gemini #{idx}"})
+        if current_user["is_guest"]:
+            add_to_guest_history("image_qa", prompt, result)
+        else:
+            save_interaction_to_db("image_qa", prompt, result)
 
-                logging.info(f"✅ Success with Gemini #{idx}")
-                return result
+        return result
+    except Exception as e:
+        error_msg = f"Image-based Q&A failed: {e}"
+        logging.error(error_msg)
 
-        except Exception as e:
-            error_str = str(e).lower()
-            if "429" in error_str or "quota" in error_str:
-                logging.warning(f"⚠️ Gemini #{idx} quota exceeded, trying next...")
-                continue
-            else:
-                logging.error(f"❌ Gemini #{idx} error: {e}")
-                continue
+        if not current_user["is_guest"]:
+            save_interaction_to_db("image_qa", prompt, error_msg)
 
-    # All methods failed
-    error_msg = (
-        "⚠️ **All image analysis services temporarily unavailable.**\n\n"
-        "**Solutions:**\n"
-        "1. Add backup API keys: `GEMINI_API_KEY_2`, `GEMINI_API_KEY_3`\n"
-        "2. Wait 30-60 seconds\n\n"
-        "Get free keys at: https://makersuite.google.com/app/apikey"
-    )
+        return error_msg
 
-    if not current_user["is_guest"]:
-        save_interaction_to_db("image_qa", prompt, error_msg, {"error": "all_services_failed"})
-
-    return error_msg
 
 def process_audio_for_image_qa(audio_filepath, image):
     """Process audio input for image Q&A"""
@@ -3710,95 +3117,111 @@ def handle_pasted_image(pasted_image):
 
 
 # ================================
-# GLOBAL STATE FOR FIREBASE LOGIN
+# AUTO-CHECK AUTH STATUS FUNCTION
 # ================================
-firebase_login_result = None  # Stores the 16-tuple result from login_firebase_user()
+def auto_check_auth_status(counter):
+    """Automatically check if user logged in via Firebase (runs every 500ms)"""
+    global current_session_id, guest_chat_count
 
+    # Increment counter to trigger next check
+    new_counter = counter + 1
 
+    # ✅ PRIORITY 1: Check queue for INSTANT login (no delay!)
+    try:
+        user_data = firebase_login_queue.get_nowait()  # Non-blocking check
+        if user_data:
+            username = user_data.get("username", "User")
+            logging.info(f"🚀 INSTANT FIREBASE LOGIN DETECTED: {username}")
+
+            # Force UI update immediately
+            return (
+                new_counter,  # auth_check_counter
+                f"✅ **Welcome, {username}!** All features unlocked.",
+                gr.update(visible=False),  # auth_section
+                gr.update(visible=True),  # main_app
+                f"**Logged in as:** {username}",
+                gr.update(visible=True),  # file_qa_tab
+                gr.update(visible=True),  # image_gen_tab
+                gr.update(visible=True),  # image_qa_tab
+                gr.update(visible=True),  # image_search_tab
+                gr.update(visible=True),  # video_gen_tab
+                gr.update(visible=True),  # translation_tab
+                gr.update(visible=True),  # stats_btn
+                [],  # history_chatbot
+                gr.update(visible=False),  # guest_chat_warning
+                [],  # chatbot
+                current_session_id,  # session_id
+                None  # mic_chat
+            )
+    except queue.Empty:
+        pass  # No login event in queue yet
+
+    # ✅ PRIORITY 2: Fallback check (in case queue mechanism failed)
+    if current_user.get("logged_in") and not current_user.get("is_guest"):
+        username = current_user.get("username", "User")
+        logging.info(f"🎉 AUTO-DETECT (FALLBACK): User logged in: {username}")
+
+        # Return authenticated state
+        return (
+            new_counter,  # auth_check_counter
+            f"✅ **Welcome, {username}!** All features unlocked.",
+            gr.update(visible=False),  # auth_section
+            gr.update(visible=True),  # main_app
+            f"**Logged in as:** {username}",
+            gr.update(visible=True),  # file_qa_tab
+            gr.update(visible=True),  # image_gen_tab
+            gr.update(visible=True),  # image_qa_tab
+            gr.update(visible=True),  # image_search_tab
+            gr.update(visible=True),  # video_gen_tab
+            gr.update(visible=True),  # translation_tab
+            gr.update(visible=True),  # stats_btn
+            [],  # history_chatbot
+            gr.update(visible=False),  # guest_chat_warning
+            [],  # chatbot
+            current_session_id,  # session_id
+            None  # mic_chat
+        )
+    else:
+        # Still in guest/not logged in - no UI changes
+        return (
+            new_counter,  # auth_check_counter
+            gr.update(),  # login_status - no change
+            gr.update(),  # auth_section - no change
+            gr.update(),  # main_app - no change
+            gr.update(),  # user_info - no change
+            gr.update(),  # file_qa_tab - no change
+            gr.update(),  # image_gen_tab - no change
+            gr.update(),  # image_qa_tab - no change
+            gr.update(),  # image_search_tab - no change
+            gr.update(),  # video_gen_tab - no change
+            gr.update(),  # translation_tab - no change
+            gr.update(),  # stats_btn - no change
+            gr.update(),  # history_chatbot - no change
+            gr.update(),  # guest_chat_warning - no change
+            gr.update(),  # chatbot - no change
+            gr.update(),  # session_id - no change
+            gr.update()  # mic_chat - no change
+        )
 # ================================
-# GRADIO CHECKER FOR FIREBASE LOGIN
+# FLASK ROUTE FOR FIREBASE AUTH PAGE
 # ================================
-def check_firebase_login_and_update():
-    """Check if Firebase login completed and return UI updates"""
-    global firebase_login_result
+@flask_app.route("/firebase-auth", methods=["GET"])
+# noinspection PyUnresolvedReferences,JSUnresolvedVariable
+def firebase_auth_page():
+    """Serve Firebase auth page"""
 
-    if firebase_login_result is not None:
-        result = firebase_login_result
-        firebase_login_result = None
-        logging.info("🔥 Firebase login detected! Updating Gradio UI...")
-        return result
-
-    return tuple([gr.update() for _ in range(16)])
-
-# Start Flask server in background thread
-
-if FIREBASE_AVAILABLE:
-    logging.info("✅ FastAPI routes will be registered when Gradio launches")
-
-# ================================
-# FastAPI Routes (Integrated with Gradio)
-# ================================
-def setup_api_routes(app: FastAPI):
-    """Register API routes with Gradio's FastAPI app"""
-
-    # Add CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # ===== ADD THESE NEW ENDPOINTS HERE ✅ =====
-    @app.get("/health")
-    async def health_check():
-        """Health check for Render monitoring"""
-        port = int(os.environ.get("PORT", 7860))
-        return {
-            "status": "healthy",
-            "service": "All Mind AI",
-            "port": port,
-            "environment": "Render" if os.environ.get("RENDER") else "Local",
-            "mongodb": "connected" if MONGODB_AVAILABLE else "unavailable",
-            "firebase": "enabled" if FIREBASE_AVAILABLE else "disabled",
-            "replicate": "enabled" if REPLICATE_AVAILABLE else "disabled",
-            "current_user": current_user.get("username", "None")
-        }
-
-    @app.get("/")
-    async def root():
-        """Root API endpoint"""
-        return {
-            "message": "All Mind AI is running!",
-            "endpoints": {
-                "health": "/health",
-                "firebase_auth": "/firebase-auth",
-                "check_auth": "/api/check-auth",
-                "test_firebase": "/test-firebase"
-            }
-        }
-
-    # ============================================
-
-    @app.get("/firebase-auth")
-    async def firebase_auth_page(request: Request):
-        """Serve Firebase auth page"""
-        action = request.query_params.get('action', 'login')
-
-        html = f"""
+    html = f"""
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Signing {action}...</title>
+    <title>Firebase Login</title>
     <style>
         body {{
             font-family: Arial, sans-serif;
             max-width: 600px;
             margin: 50px auto;
             padding: 20px;
-            text-align: center;
         }}
         #google-btn {{
             background: #4285f4;
@@ -3812,51 +3235,26 @@ def setup_api_routes(app: FastAPI):
         #google-btn:hover {{
             background: #357ae8;
         }}
-        .spinner {{
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #4285f4;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-            display: none;
-        }}
-        @keyframes spin {{
-            0% {{ transform: rotate(0deg); }}
-            100% {{ transform: rotate(360deg); }}
-        }}
         #status {{
             margin-top: 20px;
             padding: 15px;
             border-radius: 5px;
-            display: none;
+            border: 1px solid #ccc;
         }}
-        .success {{ 
-            background: #d4edda; 
-            border: 1px solid #c3e6cb;
-            display: block;
-        }}
-        .error {{ 
-            background: #f8d7da; 
-            border: 1px solid #f5c6cb;
-            display: block;
-        }}
+        .success {{ background: #d4edda; border-color: #c3e6cb; }}
+        .error {{ background: #f8d7da; border-color: #f5c6cb; }}
+        .loading {{ background: #fff3cd; border-color: #ffeeba; }}
     </style>
 </head>
 <body>
-    <h2>🔐 Sign {action} with Google</h2>
+    <h2>🔐 Sign in with Google</h2>
     <button id="google-btn">Continue with Google</button>
-    <div class="spinner" id="spinner"></div>
-    <div id="status"></div>
+    <div id="status" class="loading">Loading Firebase...</div>
 
     <script type="module">
         const statusDiv = document.getElementById('status');
-        const spinner = document.getElementById('spinner');
-        const btn = document.getElementById('google-btn');
-        const action = "{action}";
+
         const config = {firebase_config_json};
-        const BASE_URL = window.location.origin;
 
         if (!config.apiKey) {{
             statusDiv.textContent = '❌ Firebase not configured';
@@ -3866,47 +3264,93 @@ def setup_api_routes(app: FastAPI):
                 import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'),
                 import('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js')
             ]).then(([appModule, authModule]) => {{
+                console.log('✅ Firebase modules loaded');
+
                 const app = appModule.initializeApp(config);
                 const auth = authModule.getAuth(app);
                 const provider = new authModule.GoogleAuthProvider();
+
                 provider.setCustomParameters({{ prompt: 'select_account' }});
 
-                btn.addEventListener('click', async () => {{
-                    btn.style.display = 'none';
-                    spinner.style.display = 'block';
+                statusDiv.textContent = '✅ Ready! Click button to sign in.';
+                statusDiv.className = 'success';
+
+                document.getElementById('google-btn').addEventListener('click', async () => {{
+                    statusDiv.textContent = '⏳ Opening Google sign-in popup...';
+                    statusDiv.className = 'loading';
 
                     try {{
+                        console.log('🪟 Calling signInWithPopup()...');
                         const result = await authModule.signInWithPopup(auth, provider);
-                        const token = await result.user.getIdToken(true);
 
-                        const response = await fetch(`${{BASE_URL}}/api/firebase-login`, {{
+                        console.log('✅ Sign-in successful!');
+                        statusDiv.textContent = '⏳ Getting authentication token...';
+
+                        const token = await result.user.getIdToken(true);
+                        console.log('✅ Got token');
+
+                        statusDiv.textContent = '⏳ Sending token to backend...';
+
+                        const backendUrl = 'http://127.0.0.1:5000/api/firebase-login';
+                        const response = await fetch(backendUrl, {{
                             method: 'POST',
-                            headers: {{ 'Content-Type': 'application/json' }},
-                            body: JSON.stringify({{ token: token, action: action }})
+                            headers: {{
+                                'Content-Type': 'application/json'
+                            }},
+                            body: JSON.stringify({{ token: token }})
                         }});
 
                         const data = await response.json();
 
                         if (data.success) {{
-                            const actionText = action === 'register' ? 'Registered' : 'Logged in';
-                            statusDiv.textContent = '✅ SUCCESS! ' + actionText + ' as ' + result.user.email;
+                            statusDiv.textContent = '✅ SUCCESS! Logged in as ' + result.user.email;
                             statusDiv.className = 'success';
-                            spinner.style.display = 'none';
 
-                            alert('🎉 ' + actionText + ' successfully!\\n\\nYou can now:\\n1. Close this window\\n2. Go back to main app\\n3. Refresh the page (F5)');
-                            setTimeout(() => window.close(), 2000);
+                            const loginEvent = {{
+                                success: true,
+                                timestamp: Date.now(),
+                                username: data.user.username,
+                                email: data.user.email,
+                                full_name: data.user.full_name
+                            }};
+
+                            if (typeof(Storage) !== "undefined") {{
+                                localStorage.setItem('firebase_login_event', JSON.stringify(loginEvent));
+                                console.log('✅ Stored login event in localStorage:', loginEvent);
+                            }}
+
+                            try {{
+                                if (typeof window !== "undefined" && window.opener && !window.opener.closed) {{
+                                    window.opener.postMessage({{
+                                        type: 'firebase-login-success',
+                                        user: data.user
+                                    }}, '*');
+                                    console.log('✅ Sent message to parent window');
+                                }}
+                            }} catch (e) {{
+                                console.log('⚠️ Could not message parent:', e);
+                            }}
+
+                            statusDiv.textContent = '✅ Login successful!\\n\\nYou can close this window now.\\n\\nThe main app will detect your login automatically in 2-3 seconds.';
+
+                            setTimeout(() => {{
+                                if (typeof window !== "undefined" && window.close) {{
+                                    window.close();
+                                }}
+                            }}, 3000);
                         }} else {{
                             throw new Error(data.error || 'Backend returned success=false');
                         }}
+
                     }} catch (error) {{
-                        spinner.style.display = 'none';
-                        btn.style.display = 'block';
+                        console.error('❌ ERROR:', error);
                         statusDiv.textContent = '❌ Error: ' + error.message;
                         statusDiv.className = 'error';
                     }}
                 }});
+
             }}).catch(error => {{
-                btn.style.display = 'none';
+                console.error('❌ Failed to load Firebase:', error);
                 statusDiv.textContent = '❌ Failed to load Firebase';
                 statusDiv.className = 'error';
             }});
@@ -3915,137 +3359,172 @@ def setup_api_routes(app: FastAPI):
 </body>
 </html>
 """
-        return HTMLResponse(content=html)
+    return html
+@flask_app.route("/api/firebase-login", methods=["POST", "OPTIONS"])
+def firebase_login_endpoint():
+    """Handle Firebase authentication from frontend - CORS ENABLED"""
 
-    @app.post("/api/firebase-login")
-    async def firebase_login_endpoint(request: Request):
-        """Handle Firebase authentication"""
-        global firebase_login_result
+    # Handle CORS preflight
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "ok"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
+        return response, 200
 
-        try:
-            data = await request.json()
-            id_token = data.get("token")
-            action = data.get("action", "login")
+    print("\n" + "=" * 80)
+    print("🔥 FIREBASE LOGIN ENDPOINT CALLED")
+    print("=" * 80)
 
-            logging.info(f"🔥 Firebase {action} attempt")
+    try:
+        # Log everything
+        print(f"Method: {request.method}")
+        print(f"Headers: {dict(request.headers)}")
+        print(f"Content-Type: {request.content_type}")
+        print(f"Data: {request.data}")
 
-            if not id_token:
-                return JSONResponse(
-                    {"success": False, "error": "No token provided"},
-                    status_code=400
-                )
+        data = request.get_json(force=True)
+        print(f"Parsed JSON: {data}")
 
-            user_info = verify_firebase_token(id_token)
+        id_token = data.get("token") if data else None
 
-            if not user_info:
-                return JSONResponse(
-                    {"success": False, "error": "Invalid or expired token"},
-                    status_code=401
-                )
+        if not id_token:
+            print("❌ NO TOKEN PROVIDED")
+            response = jsonify({"success": False, "error": "No token provided"})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 400
 
-            if action == "register":
-                success, message = register_or_login_firebase_user(user_info)
+        print(f"Token length: {len(id_token)}")
+        print(f"Token preview: {id_token[:50]}...")
 
-                if success:
-                    is_new_user = "Welcome to All Mind" in message or "🎉" in message
-                    return JSONResponse({
-                        "success": True,
-                        "message": message,
-                        "is_new_user": is_new_user,
-                        "user": {
-                            "username": current_user["username"],
-                            "email": current_user["email"],
-                            "full_name": current_user.get("full_name", "")
-                        }
-                    })
-                else:
-                    return JSONResponse(
-                        {"success": False, "error": message},
-                        status_code=409
-                    )
-            else:
-                result_tuple = login_firebase_user(user_info)
-                firebase_login_result = result_tuple
+        # Verify token
+        print("🔐 Verifying token...")
+        user_info = verify_firebase_token(id_token)
 
-                success_msg = result_tuple[0]
-                is_success = "Welcome back" in success_msg or "✅" in success_msg
+        if not user_info:
+            print("❌ TOKEN VERIFICATION FAILED")
+            response = jsonify({"success": False, "error": "Invalid or expired token"})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 401
 
-                if is_success:
-                    return JSONResponse({
-                        "success": True,
-                        "message": success_msg,
-                        "user": {
-                            "username": current_user["username"],
-                            "email": current_user["email"],
-                            "full_name": current_user.get("full_name", "")
-                        }
-                    })
-                else:
-                    return JSONResponse(
-                        {"success": False, "error": success_msg},
-                        status_code=404
-                    )
+        print(f"✅ Token verified! User: {user_info.get('email')}")
 
-        except Exception as e:
-            logging.error(f"❌ Firebase auth error: {e}")
-            import traceback
-            traceback.print_exc()
-            return JSONResponse(
-                {"success": False, "error": str(e)},
-                status_code=500
-            )
+        # Register/login user
+        success, message = register_or_login_firebase_user(user_info)
 
-    @app.get("/api/check-auth")
-    async def check_auth_status():
-        """Check authentication status"""
-        return JSONResponse({
-            "logged_in": current_user.get("logged_in", False),
-            "username": current_user.get("username"),
-            "is_guest": current_user.get("is_guest", True)
-        })
+        if success:
+            print(f"✅ User logged in: {current_user['username']}")
 
-    @app.get("/test-firebase")
-    async def test_firebase():
-        """Test Firebase configuration"""
-        try:
-            app_instance = firebase_admin.get_app()
-            return JSONResponse({
-                "status": "✅ Firebase initialized",
-                "app_name": app_instance.name,
-                "project_id": app_instance.project_id if hasattr(app_instance, 'project_id') else "N/A"
+            # ✅ INSTANT NOTIFICATION TO GRADIO
+            notify_gradio_login({
+                "username": current_user["username"],
+                "email": current_user["email"],
+                "full_name": current_user.get("full_name", "")
             })
-        except ValueError:
-            return JSONResponse(
-                {"status": "❌ Firebase NOT initialized", "error": "No Firebase app found"},
-                status_code=500
-            )
-        except Exception as e:
-            return JSONResponse(
-                {"status": "❌ Error", "error": str(e)},
-                status_code=500
-            )
+
+            response = jsonify({
+                "success": True,
+                "message": message,
+                "user": {
+                    "username": current_user["username"],
+                    "email": current_user["email"],
+                    "full_name": current_user.get("full_name", "")
+                }
+            })
+
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 200
+        else:
+            print(f"❌ Login failed: {message}")
+            response = jsonify({"success": False, "error": message})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 500
+
+    except Exception as e:
+        print(f"❌ EXCEPTION: {e}")
+        print(traceback.format_exc())
+        response = jsonify({"success": False, "error": str(e)})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        return response, 500
+    finally:
+        print("=" * 80 + "\n")
+
+@flask_app.route("/api/check-auth", methods=["GET"])
+def check_auth_status():
+    """Check if user is authenticated"""
+    return jsonify({
+        "logged_in": current_user.get("logged_in", False),
+        "username": current_user.get("username"),
+        "email": current_user.get("email"),
+        "is_guest": current_user.get("is_guest", True),
+        "full_name": current_user.get("full_name", "")
+    })
+
+@flask_app.route("/test-firebase", methods=["GET"])
+def test_firebase():
+    """Test Firebase configuration"""
+    try:
+        app = firebase_admin.get_app()
+        return jsonify({
+            "status": "✅ Firebase initialized",
+            "app_name": app.name,
+            "project_id": app.project_id if hasattr(app, 'project_id') else "N/A"
+        }), 200
+    except ValueError:
+        return jsonify({
+            "status": "❌ Firebase NOT initialized",
+            "error": "No Firebase app found"
+        }), 500
+    except Exception as e:
+        return jsonify({
+            "status": "❌ Error",
+            "error": str(e)
+        }), 500
+
+# Start Flask server in background thread
+def run_flask():
+    """Run Flask server in a separate thread"""
+    flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+
+
+if FIREBASE_AVAILABLE:
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logging.info("✅ Flask server started on port 5000 for Firebase auth")
 
 # ------------------ GRADIO UI ------------------
+# Replace the existing js parameter in gr.Blocks() with this corrected version:
+
 with gr.Blocks(
-    title="All Mind",
-    theme=gr.themes.Soft()
+        title="All Mind",
+        theme=gr.themes.Soft(),
+        css="""
+    body::before {
+        content: '';
+        display: none;
+    }
+    """
 ) as demo:
+    # IMPORTANT: The js parameter is removed - we'll use client-side code differently
+    # If you need auto-login detection, use gr.load() or event handlers instead
 
     gr.Markdown("# 🤖 All Mind")
+
     # Login/Register Section
     with gr.Group(visible=False) as auth_section:
         gr.Markdown("## 🔐 Welcome! Please Login or Register")
         guest_status = gr.Markdown("", visible=False)
+        auth_check_timer = gr.Timer(value=0.5, active=True)
 
         with gr.Tab("Login"):
-            gr.Markdown("## 🔑 Sign In to Your Account")
-
-            # ADD THIS BLOCK - Google Sign-In for Login
             if FIREBASE_AVAILABLE:
-                gr.Markdown("### 🚀 Quick Sign In with Google")
-                gr.HTML(login_html)  # ← YOU'RE MISSING THIS!
+                gr.Markdown("#### 🚀 Quick Login with Google (Recommended)")
+                gr.HTML(login_html)
                 gr.Markdown("---\n**OR**\n---")
-                gr.Markdown("### Traditional Login")
+                gr.Markdown("### Traditional Email/Username Login")
+            else:
+                gr.Markdown("⚠️ **Google Sign-In temporarily unavailable** - Use email login below")
+                gr.Markdown("### Login with Email/Username")
 
             with gr.Row():
                 login_username = gr.Textbox(label="Username", placeholder="Enter your username")
@@ -4053,10 +3532,15 @@ with gr.Blocks(
             login_btn = gr.Button("🔑 Login", variant="primary", size="lg")
             login_status = gr.Markdown()
 
+            gr.Markdown("""
+            **Don't have an account?**
+            - Go to the **Register** tab to create a FREE account
+            - Or click the **Continue with Google** button above
+            """)
+
         with gr.Tab("Register"):
             gr.Markdown("### 🎉 Create Your Free Account!")
 
-            # Firebase Google Sign-In (if available)
             if FIREBASE_AVAILABLE:
                 gr.Markdown("#### 🚀 Quick Sign Up with Google (Recommended)")
                 gr.HTML(register_html)
@@ -4107,20 +3591,25 @@ with gr.Blocks(
 
         gr.Markdown(
             "### 🎤 **Voice Input Available on All Tabs!** Click the microphone icon to speak instead of typing.")
-        gr.Markdown(
-            "To Use all our features Please Logout from guest mode and register if not and Login to use full features")
 
-        # Create a row with history button on the left and main content on the right
         with gr.Row():
-            # Left sidebar for history button (small width)
-            with gr.Column(scale=1, min_width=120):
-                show_history_btn = gr.Button("📋 Show My History", variant="primary", size="sm")
+            chat_timer = gr.Textbox(label="Chat Timer", interactive=False, value=get_timer_text("text_qa", "Chat"))
+            file_qa_timer = gr.Textbox(label="File Q&A Timer", interactive=False,
+                                       value=get_timer_text("file_qa", "File Q&A"))
+            image_timer = gr.Textbox(label="Image Timer", interactive=False,
+                                     value=get_timer_text("image_gen", "Image Gen"))
+            video_timer = gr.Textbox(label="Video Timer", interactive=False,
+                                     value=get_timer_text("video_gen", "Video Gen"))
+            image_search_timer = gr.Textbox(label="Image Search Timer", interactive=False,
+                                            value=get_timer_text("image_search", "Image Search"))
+            ip_timer = gr.Textbox(label="Public IP Timer", interactive=False,
+                                  value=get_timer_text("public_ip", "Public IP"))
 
-            # Right side for main content (large width)
-            with gr.Column(scale=10):
-                pass  # Main content will go here
+        with gr.Row():
+            show_history_btn = gr.Button("📋 Show My History", variant="primary", size="lg")
 
         session_id = gr.State(0)
+        auth_check_counter = gr.State(0)
 
         with gr.Group(visible=False) as history_modal:
             with gr.Row():
@@ -4157,6 +3646,20 @@ with gr.Blocks(
             user_input = gr.Textbox(placeholder="Enter your message here... or use voice input above",
                                     label="Type your message")
 
+            target_language_dropdown = gr.Dropdown(
+                label="Select target language",
+                choices=["fr", "es", "hi", "zh", "de"],
+                visible=False
+            )
+
+            translation_output_textbox = gr.Textbox(label="Translated Text", interactive=False)
+            translation_audio_output = gr.Audio(label="Spoken Output")
+
+            with gr.Row():
+                target_language_dropdown
+                translation_output_textbox
+                translation_audio_output
+
             with gr.Row():
                 send_btn = gr.Button("Send", variant="primary")
                 new_chat_btn = gr.Button("🆕 New Chat", variant="secondary")
@@ -4168,7 +3671,6 @@ with gr.Blocks(
             )
 
 
-            # ✅ CRITICAL FIX: Voice input wrapper with forced validation
             def safe_voice_handler(audio_filepath, history, session_id_state):
                 """Wrapper that FORCES history validation before processing voice"""
                 global current_session_id
@@ -4274,6 +3776,27 @@ with gr.Blocks(
                 outputs=qa_output
             )
 
+            gr.Markdown("#### 📋 Or Paste an Image (Ctrl+V):")
+            with gr.Row():
+                pasted_image = gr.Image(
+                    label="Paste Image Here (Ctrl+V or right-click paste)",
+                    type="pil",
+                    height=300,
+                    sources=["clipboard", "upload"]
+                )
+
+            search_output = gr.Image(label="Search Result Image", type="pil", height=512)
+            search_status = gr.Textbox(label="Status", interactive=False)
+
+            with gr.Row():
+                process_paste_btn = gr.Button("Process Pasted Image", variant="secondary")
+
+            process_paste_btn.click(
+                handle_pasted_image,
+                inputs=pasted_image,
+                outputs=[search_output, search_status]
+            )
+
         with gr.Tab("🖼️ Image Search", visible=False) as image_search_tab:
             gr.Markdown("### 🌐 Search and retrieve a relevant image from Google")
             gr.Markdown("**💡 NEW: Paste images with Ctrl+V!** Use the paste area below to paste images from clipboard.")
@@ -4330,7 +3853,7 @@ with gr.Blocks(
                 outputs=[video_status, video_output]
             )
 
-        with gr.Tab("Public IP", visible=False) as public_ip_tab:
+        with gr.Tab("Public IP"):
             gr.Markdown("### Check your current public IP address")
             ip_output = gr.Markdown(label="IP Address")
             ip_btn = gr.Button("Get Public IP", variant="primary")
@@ -4341,7 +3864,6 @@ with gr.Blocks(
                 outputs=ip_output
             )
 
-        # CORRECT: Translation tab is NOW OUTSIDE Public IP tab
         with gr.Tab("🌐 Translation", visible=False) as translation_tab:
             gr.Markdown("## 🌍 Universal Translator - Any Language to Any Language")
             gr.Markdown(
@@ -4370,7 +3892,7 @@ with gr.Blocks(
                 target_lang_dropdown = gr.Dropdown(
                     label="🎯 Target Language (Select from 50+ languages)",
                     choices=[(name, code) for name, code in sorted(SUPPORTED_LANGUAGES.items())],
-                    value="hi",  # Default to Hindi
+                    value="hi",
                     filterable=True
                 )
                 translate_btn = gr.Button("🔄 Translate & Speak", variant="primary", size="lg")
@@ -4417,12 +3939,14 @@ with gr.Blocks(
                 inputs=[mic_translate, target_lang_dropdown],
                 outputs=[translate_input, translation_audio, translation_result]
             )
+
     # Authentication Event Handlers
     login_btn.click(
         login_user,
         inputs=[login_username, login_password],
         outputs=[login_status, auth_section, main_app, user_info, file_qa_tab, image_gen_tab, image_qa_tab,
-                 image_search_tab, video_gen_tab,translation_tab, stats_btn, history_chatbot, guest_chat_warning, chatbot, session_id, mic_chat]
+                 image_search_tab, video_gen_tab, translation_tab, stats_btn, history_chatbot, guest_chat_warning,
+                 chatbot, session_id, mic_chat]
     )
 
     request_otp_btn.click(
@@ -4444,20 +3968,6 @@ with gr.Blocks(
                  image_search_tab, video_gen_tab, translation_tab, stats_btn, history_chatbot, guest_chat_warning,
                  chatbot, session_id, mic_chat]
     )
-    # Firebase login checker - polls every 2 seconds to detect Google login
-    firebase_check_timer = gr.Timer(value=2, active=True)
-
-    firebase_check_timer.tick(
-        check_firebase_login_and_update,
-        inputs=None,
-        outputs=[
-            login_status, auth_section, main_app, user_info,
-            file_qa_tab, image_gen_tab, image_qa_tab,
-            image_search_tab, video_gen_tab, translation_tab,
-            stats_btn, history_chatbot, guest_chat_warning,
-            chatbot, session_id, mic_chat
-        ]
-    )
 
 
     def show_stats():
@@ -4472,8 +3982,6 @@ with gr.Blocks(
     stats_btn.click(show_stats, outputs=[stats_modal, stats_content])
     close_stats_btn.click(close_stats, outputs=stats_modal)
 
-
-
     demo.load(
         start_as_guest,
         inputs=None,
@@ -4486,40 +3994,17 @@ with gr.Blocks(
         ]
     )
 
-# === RENDER DEPLOYMENT FIX ===
-if os.environ.get("RENDER"):
-    try:
-        import pytesseract
-        pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
-        logging.info("✅ Tesseract configured for Render")
-    except ImportError:
-        logging.warning("⚠️ pytesseract not available")
+    auth_check_timer.tick(
+        auto_check_auth_status,
+        inputs=[auth_check_counter],
+        outputs=[
+            auth_check_counter, login_status, auth_section, main_app, user_info,
+            file_qa_tab, image_gen_tab, image_qa_tab, image_search_tab, video_gen_tab,
+            translation_tab, stats_btn, history_chatbot, guest_chat_warning,
+            chatbot, session_id, mic_chat
+        ]
+    )
 
 if __name__ == "__main__":
-    # Get port from environment (Render sets this)
-    port = int(os.environ.get("PORT", 7860))
+    demo.launch()
 
-    logging.info(f"\n{'=' * 60}")
-    logging.info(f"🚀 All Mind Starting on Port {port}")
-    logging.info(f"🌐 Bind Address: 0.0.0.0:{port}")
-    logging.info(f"🌐 Environment: {'Render' if os.environ.get('RENDER') else 'Local'}")
-    logging.info(f"{'=' * 60}\n")
-
-    # Register Firebase routes BEFORE queueing/launching
-    if FIREBASE_AVAILABLE:
-        setup_api_routes(demo.app)
-        logging.info("✅ Firebase API routes registered with Gradio")
-
-    # Queue for handling multiple concurrent users
-    demo.queue(max_size=20)
-
-    # Launch with production-ready settings
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=port,
-        share=False,
-        show_error=True,
-        quiet=False,
-        ssl_verify=False,
-        prevent_thread_lock=False
-    )
