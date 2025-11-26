@@ -41,35 +41,18 @@ import smtplib
 import queue
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+# Detect environment and set base URL
+SPACE_ID = os.getenv("SPACE_ID")
+if SPACE_ID:
+    BASE_URL = f"https://{SPACE_ID.replace('/', '-')}.hf.space"
+    IS_HUGGINGFACE = True
+else:
+    BASE_URL = "http://127.0.0.1:7860"
+    IS_HUGGINGFACE = False
+
+logging.info(f"🌐 Base URL: {BASE_URL}")
 flask_app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-try:
-    firebase_service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "serviceAccountKey.json")
-
-    if os.path.exists(firebase_service_account_path):
-        cred = credentials.Certificate(firebase_service_account_path)
-        try:
-            firebase_admin.get_app()
-            logging.info("✅ Firebase already initialized")
-        except ValueError:
-            firebase_admin.initialize_app(cred)
-            logging.info("✅ Firebase Admin SDK initialized successfully from file")
-    else:
-        firebase_creds_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-        if firebase_creds_json:
-            cred_dict = json.loads(firebase_creds_json)
-            cred = credentials.Certificate(cred_dict)
-            try:
-                firebase_admin.get_app()
-                logging.info("✅ Firebase already initialized")
-            except ValueError:
-                firebase_admin.initialize_app(cred)
-                logging.info("✅ Firebase Admin SDK initialized from environment variable")
-        else:
-            logging.warning("⚠️ Firebase service account not configured. Google Sign-In unavailable.")
-except Exception as e:
-    logging.error(f"❌ Firebase initialization failed: {e}", exc_info=True)
 
 MONGODB_URI = os.getenv("MONGODB_URI")
 import traceback
@@ -1000,7 +983,7 @@ def start_as_guest():
     # ---- 16 return values (order must match demo.load outputs) ------------
     return (
         # 1. guest_status (Markdown)
-        "Wellcome, Guest! You can try the Chat feature with 10 free messages.\n\n"
+        "Welcome, Guest! You can try the Chat feature with 10 free messages.\n\n"
         "**Register to unlock:**\n"
         "- File Q&A\n"
         "- Image Generation\n"
@@ -1074,10 +1057,12 @@ firebase_config = {
 firebase_config_json = json.dumps(firebase_config)
 
 
-register_html = """
+# ✅ CORRECTED VERSION - Replace your existing register_html and login_html with this:
+
+register_html = f"""
 <div style="padding: 20px; text-align: center;">
     <style>
-        .google-signin-btn {
+        .google-signin-btn {{
             background-color: #4285f4;
             color: white;
             border: none;
@@ -1091,15 +1076,15 @@ register_html = """
             transition: all 0.3s;
             margin: 10px auto;
             text-decoration: none;
-        }
-        .google-signin-btn:hover {
+        }}
+        .google-signin-btn:hover {{
             background-color: #357ae8;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(66, 133, 244, 0.4);
-        }
+        }}
     </style>
 
-    <a href="http://127.0.0.1:5000/firebase-auth" target="_blank" class="google-signin-btn">
+        <a href="/api/firebase-auth" target="_blank" class="google-signin-btn">
         <svg width="18" height="18" viewBox="0 0 48 48">
             <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
             <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
@@ -1115,10 +1100,10 @@ register_html = """
 </div>
 """
 
-login_html = """
+login_html = f"""
 <div style="padding: 20px; text-align: center;">
     <style>
-        .google-signin-btn {
+        .google-signin-btn {{
             background-color: #4285f4;
             color: white;
             border: none;
@@ -1132,15 +1117,15 @@ login_html = """
             transition: all 0.3s;
             margin: 10px auto;
             text-decoration: none;
-        }
-        .google-signin-btn:hover {
+        }}
+        .google-signin-btn:hover {{
             background-color: #357ae8;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(66, 133, 244, 0.4);
-        }
+        }}
     </style>
 
-    <a href="http://127.0.0.1:5000/firebase-auth" target="_blank" class="google-signin-btn">
+    <a href="/api/firebase-auth" target="_blank" class="google-signin-btn">
         <svg width="18" height="18" viewBox="0 0 48 48">
             <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
             <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
@@ -3291,7 +3276,7 @@ def firebase_auth_page():
 
                         statusDiv.textContent = '⏳ Sending token to backend...';
 
-                        const backendUrl = 'http://127.0.0.1:5000/api/firebase-login';
+                       const backendUrl = '/api/firebase-login';
                         const response = await fetch(backendUrl, {{
                             method: 'POST',
                             headers: {{
@@ -3360,7 +3345,7 @@ def firebase_auth_page():
 </html>
 """
     return html
-@flask_app.route("/api/firebase-login", methods=["POST", "OPTIONS"])
+@flask_app.route("/firebase-login", methods=["POST", "OPTIONS"])
 def firebase_login_endpoint():
     """Handle Firebase authentication from frontend - CORS ENABLED"""
 
@@ -3449,7 +3434,7 @@ def firebase_login_endpoint():
     finally:
         print("=" * 80 + "\n")
 
-@flask_app.route("/api/check-auth", methods=["GET"])
+@flask_app.route("/check-auth", methods=["GET"])
 def check_auth_status():
     """Check if user is authenticated"""
     return jsonify({
@@ -3458,6 +3443,15 @@ def check_auth_status():
         "email": current_user.get("email"),
         "is_guest": current_user.get("is_guest", True),
         "full_name": current_user.get("full_name", "")
+    })
+
+@flask_app.route("/test", methods=["GET"])
+def test_route():
+    """Test if Flask is working"""
+    return jsonify({
+        "message": "✅ Flask is working!",
+        "base_url": BASE_URL,
+        "routes": [str(rule) for rule in flask_app.url_map.iter_rules()]
     })
 
 @flask_app.route("/test-firebase", methods=["GET"])
@@ -3481,20 +3475,13 @@ def test_firebase():
             "error": str(e)
         }), 500
 
-# Start Flask server in background thread
-def run_flask():
-    """Run Flask server in a separate thread"""
-    flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
-
-if FIREBASE_AVAILABLE:
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logging.info("✅ Flask server started on port 5000 for Firebase auth")
+# ============================================================================
+# REPLACE EVERYTHING FROM "# Start Flask server..." TO THE END
+# Delete the old Flask thread code and demo.launch(), replace with this:
+# ============================================================================
 
 # ------------------ GRADIO UI ------------------
-# Replace the existing js parameter in gr.Blocks() with this corrected version:
-
 with gr.Blocks(
         title="All Mind",
         theme=gr.themes.Soft(),
@@ -3505,9 +3492,6 @@ with gr.Blocks(
     }
     """
 ) as demo:
-    # IMPORTANT: The js parameter is removed - we'll use client-side code differently
-    # If you need auto-login detection, use gr.load() or event handlers instead
-
     gr.Markdown("# 🤖 All Mind")
 
     # Login/Register Section
@@ -4005,7 +3989,51 @@ with gr.Blocks(
         ]
     )
 
-if __name__ == "__main__":
-    demo.launch()
+# ============================================================================
+# ✅ CORRECTED: Proper Flask + Gradio integration for HF Spaces
+# ============================================================================
+if FIREBASE_AVAILABLE:
+    from fastapi import FastAPI
+    from starlette.middleware.wsgi import WSGIMiddleware
 
+    # Create FastAPI app (required for gr.mount_gradio_app)
+    fastapi_app = FastAPI()
 
+    # Mount Flask as WSGI middleware at /api path
+    fastapi_app.mount("/api", WSGIMiddleware(flask_app))
+
+    # Mount Gradio at root path
+    app = gr.mount_gradio_app(fastapi_app, demo, path="/")
+
+    logging.info("✅ Flask + Gradio mounted via FastAPI - Firebase auth ready!")
+
+    if __name__ == "__main__":
+        from fastapi import FastAPI
+        from starlette.middleware.wsgi import WSGIMiddleware
+        import uvicorn
+        import threading
+
+        # Create FastAPI app
+        fastapi_app = FastAPI()
+
+        # ✅ FIX: Mount Flask BEFORE Gradio
+        fastapi_app.mount("/api", WSGIMiddleware(flask_app))
+
+        # Mount Gradio at root
+        app = gr.mount_gradio_app(fastapi_app, demo, path="/")
+
+        logging.info("=" * 80)
+        logging.info("✅ SERVER CONFIGURATION:")
+        logging.info(f"   Base URL: {BASE_URL}")
+        logging.info(f"   Gradio UI: {BASE_URL}/")
+        logging.info(f"   Firebase Auth: {BASE_URL}/api/firebase-auth")
+        logging.info(f"   Login Endpoint: {BASE_URL}/api/firebase-login")
+        logging.info("=" * 80)
+
+        # Start server
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=7860,
+            log_level="info"
+        )
