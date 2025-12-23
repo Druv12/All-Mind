@@ -43,13 +43,8 @@ from email.mime.multipart import MIMEMultipart
 
 # Detect environment and set base URL
 SPACE_ID = os.getenv("SPACE_ID")
-SPACE_HOST = os.getenv("SPACE_HOST")  # Hugging Face also provides this
-
 if SPACE_ID:
     BASE_URL = f"https://{SPACE_ID.replace('/', '-')}.hf.space"
-    IS_HUGGINGFACE = True
-elif SPACE_HOST:
-    BASE_URL = f"https://{SPACE_HOST}"
     IS_HUGGINGFACE = True
 else:
     BASE_URL = "http://127.0.0.1:7860"
@@ -58,10 +53,9 @@ else:
 logging.info(f"🌐 Base URL: {BASE_URL}")
 flask_app = Flask(__name__)
 from flask_cors import CORS
-
 CORS(flask_app, resources={
     r"/*": {
-        "origins": "*",  # Allow all origins for Hugging Face
+        "origins": ["http://localhost:7860", "http://127.0.0.1:7860"],
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "supports_credentials": True
@@ -69,20 +63,7 @@ CORS(flask_app, resources={
 })
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ✅ DYNAMIC API URL HELPER
-def get_api_base_url():
-    """Get the correct API base URL for current environment"""
-    if IS_HUGGINGFACE:
-        # On Hugging Face, Flask runs on same domain but port 5000
-        return BASE_URL.replace(':7860', ':5000')
-    else:
-        return "http://localhost:5000"
-
-API_BASE_URL = get_api_base_url()
-logging.info(f"🌐 API Base URL: {API_BASE_URL}")
-
 MONGODB_URI = os.getenv("MONGODB_URI")
-
 import traceback
 
 # Now you can safely set the seed
@@ -204,18 +185,6 @@ except Exception as e:
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# ✅ ADD THIS HELPER FUNCTION HERE
-def get_api_base_url():
-    """Get the correct API base URL for current environment"""
-    if IS_HUGGINGFACE:
-        # On Hugging Face, Flask runs on same domain but port 5000
-        return BASE_URL.replace(':7860', ':5000')
-    else:
-        return "http://localhost:5000"
-
-API_BASE_URL = get_api_base_url()
-logging.info(f"🌐 API Base URL: {API_BASE_URL}")
 
 # --- Configuration & Environment Setup ---
 load_dotenv()
@@ -1214,9 +1183,9 @@ print("authDomain present:", bool(firebase_config.get("authDomain")))
 print("projectId present:", bool(firebase_config.get("projectId")))
 print("=" * 80)
 
-register_html = f"""
+register_html = """
     <div style="padding: 20px; text-align: center;">
-        <a href="{API_BASE_URL}/firebase-auth?action=register" target="_blank" style="
+        <a href="http://localhost:5000/firebase-auth?action=register" target="_blank" style="
             background-color: #4285f4;
             color: white;
             border: none;
@@ -1243,9 +1212,9 @@ register_html = f"""
     </div>
     """
 
-login_html = f"""
+login_html = """
     <div style="padding: 20px; text-align: center;">
-        <a href="{API_BASE_URL}/firebase-auth?action=login" target="_blank" style="
+        <a href="http://localhost:5000/firebase-auth?action=login" target="_blank" style="
             background-color: #4285f4;
             color: white;
             border: none;
@@ -1457,7 +1426,7 @@ def logout_user():
 
 
 def format_history_for_chatbot():
-    """Fetch ONLY current user's history - COMPLETELY ISOLATED"""
+    """Fetch ONLY current user's history - COMPLETELY ISOLATED - TUPLES FORMAT"""
     chatbot_history = []
 
     if current_user.get("is_guest", False):
@@ -1466,34 +1435,35 @@ def format_history_for_chatbot():
         entries = guest_session_history.get("chat", [])
 
         if entries:
-            chatbot_history.append((
-                f"--- **💬 Guest Session History** ({len(entries)} messages) ---",
-                "**⚠️ TEMPORARY DATA - Will be deleted on logout**"
-            ))
+            # ✅ FIX: Use list format [user, assistant]
+            chatbot_history.append([
+                "",  # Empty user message
+                f"--- **💬 Guest Session History** ({len(entries)} messages) ---\n\n**⚠️ TEMPORARY DATA - Will be deleted on logout**"
+            ])
 
             for entry in entries:
                 timestamp = entry.get("timestamp", "")
                 full_query = entry.get("full_query", "No Query")
                 full_response = entry.get("full_response", "No Response")
 
-                chatbot_history.append((
+                chatbot_history.append([
                     f"**{timestamp}** | Q: {full_query}",
                     f"A: {full_response}"
-                ))
+                ])
         else:
-            chatbot_history.append((
-                None,
+            chatbot_history.append([
+                "",
                 "📭 **No guest history yet.**\n\nStart chatting to see your activity here!\n\n🔒 **Note:** Guest history is temporary. Register to save permanently."
-            ))
+            ])
 
         return chatbot_history
 
     if not current_user.get("logged_in", False) or not current_user.get("username"):
         logging.warning("⚠️ Attempted to load history without login")
-        return [(None, "📭 **Please login to view your history.**")]
+        return [["", "📭 **Please login to view your history.**"]]
 
     if not MONGODB_AVAILABLE:
-        return [(None, "❌ **Database not available.**")]
+        return [["", "❌ **Database not available.**"]]
 
     try:
         username = current_user["username"]
@@ -1506,16 +1476,16 @@ def format_history_for_chatbot():
 
         if not user_doc or not user_doc.get("history"):
             logging.info(f"📭 User {username} has no history")
-            return [(
-                None,
+            return [[
+                "",
                 f"📭 **No history for: {username}**\n\nStart using features to see your activity here!"
-            )]
+            ]]
 
         total_items = len(user_doc["history"])
-        chatbot_history.append((
-            f"--- **📚 {username.upper()}'s Complete History** ({total_items} items) ---",
-            "**All YOUR interactions. This data belongs ONLY to you.**"
-        ))
+        chatbot_history.append([
+            "",
+            f"--- **📚 {username.upper()}'s Complete History** ({total_items} items) ---\n\n**All YOUR interactions. This data belongs ONLY to you.**"
+        ])
 
         feature_icons = {
             "chat": "💬", "file_qa": "📄", "image_gen": "🎨",
@@ -1531,10 +1501,10 @@ def format_history_for_chatbot():
             icon = feature_icons.get(feature, "📋")
             feature_name = feature.replace("_", " ").title()
 
-            chatbot_history.append((
-                f"--- **{icon} {feature_name}** ({len(entries)} items) ---",
-                ""
-            ))
+            chatbot_history.append([
+                "",
+                f"--- **{icon} {feature_name}** ({len(entries)} items) ---"
+            ])
 
             for entry in entries:
                 timestamp = entry.get("timestamp")
@@ -1544,18 +1514,17 @@ def format_history_for_chatbot():
                 text = entry.get("text", "No Query")[:200]
                 reply = entry.get("reply", "No Response")[:300]
 
-                chatbot_history.append((
+                chatbot_history.append([
                     f"**{timestamp}** | Q: {text}",
                     f"A: {reply}"
-                ))
+                ])
 
         logging.info(f"✅ Loaded {total_items} history items for {username}")
         return chatbot_history
 
     except Exception as e:
         logging.error(f"❌ Error loading history for {current_user.get('username', 'unknown')}: {e}")
-        return [(None, f"❌ **Error loading history:** {e}")]
-
+        return [["", f"❌ **Error loading history:** {e}"]]
 
 def check_feature_access(feature_name):
     """Check if user can access a feature"""
@@ -1957,7 +1926,7 @@ def check_guest_feature_access(feature_name):
 
 
 def query_model(prompt, history, session_id_state):
-    """Chat function with GROQ FIRST, then Gemini rotation, then OpenAI"""
+    """Chat function with GROQ FIRST, then Gemini rotation, then OpenAI - FIXED"""
     global current_session_id, current_gemini_key_index
 
     # Session validation
@@ -1976,12 +1945,12 @@ def query_model(prompt, history, session_id_state):
 
     limit_check = check_guest_chat_limit()
     if limit_check:
-        history.append((prompt, limit_check))
+        history.append([prompt, limit_check])  # ✅ FIX: Use list format
         return history, "", session_id_state
 
     limit_msg = check_rate_limit("text_qa")
     if limit_msg:
-        history.append((prompt, limit_msg))
+        history.append([prompt, limit_msg])  # ✅ FIX: Use list format
         return history, "", session_id_state
 
     global guest_chat_count
@@ -1990,13 +1959,30 @@ def query_model(prompt, history, session_id_state):
     else:
         increment_usage("chat")
 
-    # Build message history
+    # ✅ FIX: Move llm_messages OUTSIDE the else block
     llm_messages = []
-    for user_msg, assistant_msg in history:
-        if user_msg:
-            llm_messages.append({"role": "user", "content": user_msg})
-        if assistant_msg:
-            llm_messages.append({"role": "model", "content": assistant_msg})
+
+    # Build message history - handle both old and new formats
+    if history and len(history) > 0:
+        # Check format of first item
+        if isinstance(history[0], dict):
+            # New format (shouldn't happen with tuples chatbot, but handle it)
+            for msg in history:
+                role = msg.get("role")
+                content = msg.get("content")
+                if role == "user":
+                    llm_messages.append({"role": "user", "content": content})
+                elif role == "assistant":
+                    llm_messages.append({"role": "model", "content": content})
+        else:
+            # Old format (list/tuple of [user_msg, bot_msg])
+            for item in history:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    user_msg, assistant_msg = item[0], item[1]
+                    if user_msg:
+                        llm_messages.append({"role": "user", "content": user_msg})
+                    if assistant_msg:
+                        llm_messages.append({"role": "model", "content": assistant_msg})
 
     llm_messages.append({"role": "user", "content": prompt})
 
@@ -2074,10 +2060,9 @@ def query_model(prompt, history, session_id_state):
 
                 if "quota" in err_str or "429" in err_str:
                     logging.warning(f"⚠️ Gemini key #{key_index + 1} quota exceeded, trying next key...")
-                    mark_gemini_key_limited(key_index, 60)  # 1 minute cooldown
-                    continue  # Try next key
+                    mark_gemini_key_limited(key_index, 60)
+                    continue
                 else:
-                    # Other error - log and try next key
                     logging.error(f"❌ Gemini key #{key_index + 1} error: {e}")
                     mark_gemini_key_limited(key_index, 30)
                     continue
@@ -2119,7 +2104,8 @@ def query_model(prompt, history, session_id_state):
             "- Check your API keys in .env file"
         )
 
-    history.append((prompt, answer))
+    # ✅ FIX: Append in TUPLES format [user_message, bot_message]
+    history.append([prompt, answer])
 
     # Save to history
     if current_user["is_guest"]:
@@ -2155,7 +2141,8 @@ def process_audio_and_chat(audio_filepath, history, session_id_state):
     transcribed_text = transcribe_audio(audio_filepath)
 
     if transcribed_text.startswith("❌"):
-        return history + [(None, transcribed_text)], "", update_guest_warning(), session_id_state
+        history.append({"role": "assistant", "content": transcribed_text})
+        return history, "", update_guest_warning(), session_id_state
 
     result_history, result_input, result_session = query_model(transcribed_text, history, session_id_state)
     warning = update_guest_warning()
@@ -2209,162 +2196,77 @@ def on_user_input_detect_translation(user_input, user_is_registered):
 # ============================================================================
 # ULTRA-ROBUST MAPS with AUTO-FALLBACK SYSTEM
 # ============================================================================
-# ============================================================================
-# FIXED: Maps with NO rate limiting for GPS location requests
-# ============================================================================
-
-# ============================================================================
-# FIXED: Maps with NO rate limiting for GPS location requests
-# ============================================================================
 
 def generate_ultra_robust_map(mode, location, origin, destination, nearby_location, nearby_type):
     """
-    ✅ FULLY WORKING: Maps with LIVE GPS navigation (like Google Maps)
-    ✅ FIXED: No rate limiting on GPS location requests - users can fetch as many times as needed
+    ✅ FIXED: Maps with real-time navigation, voice guidance, and location tracking
     """
     guest_check = check_guest_feature_access("Maps & Location")
     if guest_check:
         return "", guest_check
 
-    # ✅ CRITICAL FIX: ONLY rate limit MAP GENERATION, NOT GPS location requests
-    # Check if this is a GPS location request (nearby_location starts with specific coordinates pattern)
-    is_gps_request = nearby_location and ',' in nearby_location and nearby_location.count(',') >= 1
-
-    # Only apply rate limiting for actual map generation, NOT for GPS coordinate fetching
-    if not is_gps_request:  # ✅ Skip rate limit for GPS requests
-        from datetime import datetime, timedelta
-        current_time = datetime.now()
-        rate_limit_key = f"maps_{current_user.get('username', 'guest')}"
-
-        if not hasattr(generate_ultra_robust_map, 'rate_limits'):
-            generate_ultra_robust_map.rate_limits = {}
-
-        if rate_limit_key in generate_ultra_robust_map.rate_limits:
-            last_request = generate_ultra_robust_map.rate_limits[rate_limit_key]
-            time_diff = (current_time - last_request).total_seconds()
-            if time_diff < 2:
-                remaining = 2 - time_diff
-                return "", f"⚠️ Please wait {remaining:.1f} seconds before next map request."
-
-        generate_ultra_robust_map.rate_limits[rate_limit_key] = current_time
-
-    # Input validation (keep existing functions)
-    def validate_location_input(text, field_name="location"):
-        if not text or not text.strip():
-            return None, f"❌ Please enter a {field_name}."
-        text = text.strip()
-        if len(text) > 200:
-            return None, f"❌ {field_name.capitalize()} too long (max 200 characters)."
-        if len(text) < 2:
-            return None, f"❌ {field_name.capitalize()} too short (min 2 characters)."
-
-        dangerous_patterns = [
-            '<script', '</script>', 'javascript:', 'onerror=', 'onload=',
-            '<iframe', '</iframe>', '<object', '<embed', 'data:text/html'
-        ]
-        text_lower = text.lower()
-        for pattern in dangerous_patterns:
-            if pattern.lower() in text_lower:
-                return None, f"❌ Invalid {field_name}: contains blocked characters."
-
-        return text, None
-
     try:
-        # ========================================================================
-        # MODE 1: SEARCH LOCATION (same as before)
-        # ========================================================================
+        from urllib.parse import quote_plus
+
         if mode == "Search Location":
-            location, error = validate_location_input(location, "location")
-            if error:
-                return "", error
+            if not location or not location.strip():
+                return "", "❌ Please enter a location to search."
 
-            js_safe_location = location.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"').replace('\n',
-                                                                                                              '\\n')
+            safe_location = location.replace('"', '\\"').replace("'", "\\'")
 
-            map_html = f'''
+            map_html = f"""
 <div style="width: 100%; height: 650px; position: relative;">
-    <iframe style="width:100%;height:100%;border:none;background-color:#e5e3df" 
-            srcdoc="<!DOCTYPE html>
+    <iframe id="map-frame" style="width: 100%; height: 100%; border: none;" 
+            srcdoc='<!DOCTYPE html>
 <html>
 <head>
-    <meta charset=&quot;utf-8&quot;>
-    <link rel=&quot;stylesheet&quot; href=&quot;https://unpkg.com/leaflet@1.9.4/dist/leaflet.css&quot;/>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
     <style>
-        body{{margin:0;padding:0;background:#e5e3df}}
-        #map{{width:100%;height:600px;background:#e5e3df}}
-        #status{{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:#2196F3;color:white;padding:12px 24px;border-radius:8px;z-index:1000;font-size:15px;box-shadow:0 4px 12px rgba(0,0,0,0.4);font-weight:500}}
-        .success{{background:#4CAF50!important}}
-        .error{{background:#f44336!important}}
+        body {{margin:0;padding:0}}
+        #map {{width:100%;height:600px}}
+        #status {{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:#2196F3;color:white;padding:10px 20px;border-radius:5px;z-index:1000;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.3)}}
+        .success {{background:#4CAF50!important}}
+        .error {{background:#f44336!important}}
     </style>
 </head>
 <body>
-    <div id=&quot;status&quot;>🔍 Searching...</div>
-    <div id=&quot;map&quot;></div>
-    <script src=&quot;https://unpkg.com/leaflet@1.9.4/dist/leaflet.js&quot;></script>
+    <div id="status">🔍 Searching...</div>
+    <div id="map"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        const LOC = '{js_safe_location}';
-        const s = document.getElementById('status');
-
-        function show(t, c) {{
-            s.textContent = t;
-            s.className = c;
-            s.style.display = 'block';
-            if (c === 'success') {{
-                setTimeout(() => s.style.display = 'none', 4000);
-            }}
-        }}
-
-        const map = L.map('map').setView([20, 0], 2);
-        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            maxZoom: 19,
-            attribution: '© OpenStreetMap'
-        }}).addTo(map);
-
-        (async () => {{
-            try {{
-                show('🔍 Searching: ' + LOC, '');
-
-                const url = 'https://nominatim.openstreetmap.org/search?format=json&q=' + 
-                           encodeURIComponent(LOC) + '&limit=1';
-
-                const response = await fetch(url, {{
-                    headers: {{ 'User-Agent': 'AllMindApp/1.0' }}
-                }});
-
-                if (!response.ok) {{
-                    throw new Error('HTTP ' + response.status);
-                }}
-
-                const data = await response.json();
-
-                if (data && data.length > 0) {{
-                    const lat = parseFloat(data[0].lat);
-                    const lon = parseFloat(data[0].lon);
-
-                    map.setView([lat, lon], 13);
-
-                    L.marker([lat, lon])
-                        .addTo(map)
-                        .bindPopup('<b>' + data[0].display_name + '</b>')
-                        .openPopup();
-
-                    show('✅ Found: ' + data[0].display_name.substring(0, 60), 'success');
-                }} else {{
-                    show('❌ Location not found', 'error');
-                }}
-            }} catch (e) {{
-                console.error('❌ Error:', e);
-                show('❌ Error: ' + e.message, 'error');
-            }}
+        const LOC="{safe_location}";
+        const s=document.getElementById("status");
+        function show(t,c){{s.textContent=t;s.className=c;s.style.display="block";if(c==="success")setTimeout(()=>s.style.display="none",3000)}}
+        const m=L.map("map").setView([20,0],2);
+        L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",{{maxZoom:19}}).addTo(m);
+        (async()=>{{
+            try{{
+                show("🔍 Searching for: "+LOC,"");
+                const r=await fetch("https://nominatim.openstreetmap.org/search?format=json&q="+encodeURIComponent(LOC),{{headers:{{"User-Agent":"AllMindApp/1.0"}}}});
+                const d=await r.json();
+                if(d&&d.length>0){{
+                    const lat=parseFloat(d[0].lat),lon=parseFloat(d[0].lon);
+                    m.setView([lat,lon],13);
+                    L.marker([lat,lon]).addTo(m).bindPopup("<b>"+d[0].display_name+"</b>").openPopup();
+                    show("✅ Found: "+d[0].display_name.substring(0,50),"success");
+                }}else{{show("❌ Location not found","error")}}
+            }}catch(e){{show("❌ Error: "+e.message,"error")}}
         }})();
     </script>
 </body>
-</html>">
+</html>'>
     </iframe>
 </div>
-'''
+            """
 
-            info = f"📍 **Location:** {location}\n\n🗺️ **Service:** OpenStreetMap (FREE)"
+            info = f"""📍 **Location:** {location}
+
+🗺️ **Service:** OpenStreetMap (FREE)
+✅ **Works for:** ANY location worldwide
+
+💡 **Try:** "Tokyo", "Eiffel Tower", "123 Main St"
+"""
 
             if current_user["is_guest"]:
                 add_to_guest_history("maps", location, "Location viewed", {"service": "OpenStreetMap"})
@@ -2374,285 +2276,697 @@ def generate_ultra_robust_map(mode, location, origin, destination, nearby_locati
 
             return map_html, info
 
-        # ========================================================================
-        # MODE 2: GET DIRECTIONS
-        # ========================================================================
+
+
         elif mode == "Get Directions":
-            origin, error1 = validate_location_input(origin, "origin")
-            if error1:
-                return "", error1
 
-            destination, error2 = validate_location_input(destination, "destination")
-            if error2:
-                return "", error2
+            if not origin or not destination:
+                return "", "❌ Please enter both origin and destination."
 
-            js_safe_origin = origin.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
-            js_safe_dest = destination.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
+            safe_origin = origin.replace('"', '\\"').replace("'", "\\'").strip()
 
-            # [Keep the existing Get Directions map_html code - no changes needed]
-            # ... [rest of Get Directions code remains the same]
+            safe_dest = destination.replace('"', '\\"').replace("'", "\\'").strip()
 
-        # ========================================================================
-        # MODE 3: FIND NEARBY - ✅ FIXED FOR UNLIMITED GPS REQUESTS
-        # ========================================================================
-        else:  # Find Nearby
-            # ✅ Accept empty location to use GPS
-            if not nearby_type or not nearby_type.strip():
-                return "", "❌ Please enter what you want to search for (e.g., 'pizza', 'gym', 'school')"
+            map_html = f"""
 
-            nearby_type = nearby_type.strip().lower()
+        <div style="width: 100%; height: 650px; position: relative;">
 
-            # Security check only
-            dangerous_patterns = ['<script', 'javascript:', 'onerror=']
-            for pattern in dangerous_patterns:
-                if pattern in nearby_type.lower():
-                    return "", "❌ Invalid search term"
+            <iframe style="width:100%;height:100%;border:none;" 
 
-            # ✅ Check if location is provided or should use GPS
-            use_gps = not nearby_location or not nearby_location.strip()
+                    srcdoc='<!DOCTYPE html>
 
-            if use_gps:
-                location_text = "your current location"
-                js_safe_loc = ""  # Empty means use GPS
+        <html>
+
+        <head>
+
+            <meta charset="utf-8">
+
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+            <style>
+
+                * {{margin:0;padding:0;box-sizing:border-box}}
+
+                body {{height:100vh;overflow:hidden}}
+
+                #map {{width:100%;height:100%}}
+
+                #controls {{
+
+                    position:absolute;
+
+                    top:10px;
+
+                    right:10px;
+
+                    background:white;
+
+                    padding:15px;
+
+                    border-radius:10px;
+
+                    z-index:1000;
+
+                    box-shadow:0 2px 8px rgba(0,0,0,0.3);
+
+                    width:320px;
+
+                    max-height:80vh;
+
+                    overflow-y:auto
+
+                }}
+
+                #status {{margin-top:10px;padding:10px;border-radius:5px;font-size:14px;text-align:center}}
+
+                .success {{background:#d4edda;color:#155724}}
+
+                .error {{background:#f8d7da;color:#721c24}}
+
+                .info {{background:#d1ecf1;color:#0c5460}}
+
+                #voice-btn {{
+
+                    background:#4CAF50;
+
+                    color:white;
+
+                    border:none;
+
+                    padding:12px 20px;
+
+                    border-radius:5px;
+
+                    cursor:pointer;
+
+                    margin-top:10px;
+
+                    font-size:14px;
+
+                    width:100%;
+
+                    font-weight:bold
+
+                }}
+
+                #voice-btn:hover {{background:#45a049}}
+
+                #voice-btn:disabled {{background:#ccc;cursor:not-allowed}}
+
+                #directions {{
+
+                    max-height:300px;
+
+                    overflow-y:auto;
+
+                    margin-top:10px;
+
+                    padding:10px;
+
+                    background:#f5f5f5;
+
+                    border-radius:5px;
+
+                    display:none
+
+                }}
+
+                .direction-step {{
+
+                    padding:8px;
+
+                    border-left:3px solid #2196F3;
+
+                    margin:5px 0;
+
+                    padding-left:10px;
+
+                    font-size:13px;
+
+                    background:white;
+
+                    border-radius:3px
+
+                }}
+
+                #location-btn {{
+
+                    position:absolute;
+
+                    bottom:20px;
+
+                    right:20px;
+
+                    background:white;
+
+                    border:2px solid #2196F3;
+
+                    border-radius:50%;
+
+                    width:50px;
+
+                    height:50px;
+
+                    cursor:pointer;
+
+                    z-index:1000;
+
+                    display:flex;
+
+                    align-items:center;
+
+                    justify-content:center;
+
+                    font-size:24px;
+
+                    box-shadow:0 2px 8px rgba(0,0,0,0.3)
+
+                }}
+
+                #location-btn:hover {{background:#f0f0f0}}
+
+                .header {{
+
+                    font-size:16px;
+
+                    font-weight:bold;
+
+                    color:#333;
+
+                    margin-bottom:10px;
+
+                    padding-bottom:10px;
+
+                    border-bottom:2px solid #2196F3
+
+                }}
+
+            </style>
+
+        </head>
+
+        <body>
+
+            <div id="controls">
+
+                <div class="header">🧭 Navigation</div>
+
+                <div id="status" class="info">🔍 Finding route...</div>
+
+                <button id="voice-btn" onclick="toggleVoice()">🔊 Enable Voice Guidance</button>
+
+                <div id="directions"></div>
+
+            </div>
+
+            <button id="location-btn" title="Track My Location">📍</button>
+
+            <div id="map"></div>
+
+
+            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+            <script>
+
+                const ORIGIN="{safe_origin}";
+
+                const DEST="{safe_dest}";
+
+                const status=document.getElementById("status");
+
+                const voiceBtn=document.getElementById("voice-btn");
+
+                const directionsDiv=document.getElementById("directions");
+
+                let voiceEnabled=false;
+
+                let currentStep=0;
+
+                let routeSteps=[];
+
+                let userMarker=null;
+
+                let watchId=null;
+
+
+                function showStatus(msg,type){{
+
+                    status.textContent=msg;
+
+                    status.className=type;
+
+                }}
+
+
+                function speak(text){{
+
+                    if(voiceEnabled&&"speechSynthesis" in window){{
+
+                        const utterance=new SpeechSynthesisUtterance(text);
+
+                        utterance.rate=0.9;
+
+                        utterance.pitch=1;
+
+                        utterance.volume=1;
+
+                        speechSynthesis.speak(utterance);
+
+                    }}
+
+                }}
+
+
+                function toggleVoice(){{
+
+                    voiceEnabled=!voiceEnabled;
+
+                    voiceBtn.textContent=voiceEnabled?"🔇 Disable Voice":"🔊 Enable Voice";
+
+                    voiceBtn.style.background=voiceEnabled?"#f44336":"#4CAF50";
+
+                    if(voiceEnabled)speak("Voice guidance enabled");
+
+                }}
+
+
+                const map=L.map("map").setView([20,0],2);
+
+                L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",{{
+
+                    maxZoom:19,
+
+                    attribution:"© OpenStreetMap"
+
+                }}).addTo(map);
+
+
+                let routeLine=null;
+
+
+                async function getRoute(){{
+
+                    try{{
+
+                        showStatus("🔍 Finding locations...","info");
+
+
+                        // Geocode origin
+
+                        const originResp=await fetch("https://nominatim.openstreetmap.org/search?format=json&q="+encodeURIComponent(ORIGIN)+"&limit=1",{{
+
+                            headers:{{"User-Agent":"AllMindApp/1.0"}}
+
+                        }});
+
+                        const originData=await originResp.json();
+
+
+                        if(!originData||originData.length===0){{
+
+                            showStatus("❌ Origin not found: "+ORIGIN,"error");
+
+                            return;
+
+                        }}
+
+
+                        const oLat=parseFloat(originData[0].lat);
+
+                        const oLon=parseFloat(originData[0].lon);
+
+
+                        // Geocode destination
+
+                        const destResp=await fetch("https://nominatim.openstreetmap.org/search?format=json&q="+encodeURIComponent(DEST)+"&limit=1",{{
+
+                            headers:{{"User-Agent":"AllMindApp/1.0"}}
+
+                        }});
+
+                        const destData=await destResp.json();
+
+
+                        if(!destData||destData.length===0){{
+
+                            showStatus("❌ Destination not found: "+DEST,"error");
+
+                            return;
+
+                        }}
+
+
+                        const dLat=parseFloat(destData[0].lat);
+
+                        const dLon=parseFloat(destData[0].lon);
+
+
+                        // Add markers
+
+                        L.marker([oLat,oLon]).addTo(map).bindPopup("📍 Start: "+ORIGIN);
+
+                        L.marker([dLat,dLon]).addTo(map).bindPopup("🎯 End: "+DEST);
+
+
+                        showStatus("🛣️ Calculating route...","info");
+
+
+                        // Get route from OSRM
+
+                        const routeResp=await fetch(`https://router.project-osrm.org/route/v1/driving/${{oLon}},${{oLat}};${{dLon}},${{dLat}}?overview=full&steps=true&geometries=geojson`);
+
+                        const routeData=await routeResp.json();
+
+
+                        if(routeData.code!=="Ok"){{
+
+                            showStatus("❌ Route calculation failed","error");
+
+                            return;
+
+                        }}
+
+
+                        const route=routeData.routes[0];
+
+                        const coords=route.geometry.coordinates.map(c=>[c[1],c[0]]);
+
+
+                        // Draw route
+
+                        if(routeLine)map.removeLayer(routeLine);
+
+                        routeLine=L.polyline(coords,{{
+
+                            color:"#2196F3",
+
+                            weight:5,
+
+                            opacity:0.7
+
+                        }}).addTo(map);
+
+
+                        map.fitBounds(routeLine.getBounds(),{{padding:[50,50]}});
+
+
+                        // Extract turn-by-turn directions
+
+                        routeSteps=[];
+
+                        let html="<strong>📍 Turn-by-Turn Directions:</strong><br><br>";
+
+                        route.legs[0].steps.forEach((step,idx)=>{{
+
+                            const instruction=step.maneuver.instruction||"Continue";
+
+                            const distance=(step.distance/1000).toFixed(2);
+
+                            routeSteps.push(instruction);
+
+                            html+=`<div class="direction-step">${{idx+1}}. ${{instruction}} (${{distance}} km)</div>`;
+
+                        }});
+
+
+                        directionsDiv.innerHTML=html;
+
+                        directionsDiv.style.display="block";
+
+
+                        const totalDist=(route.distance/1000).toFixed(1);
+
+                        const totalTime=Math.round(route.duration/60);
+
+                        showStatus(`✅ Route: ${{totalDist}} km, ~${{totalTime}} mins`,"success");
+
+                        speak(`Route calculated. Total distance ${{totalDist}} kilometers. Estimated time ${{totalTime}} minutes.`);
+
+
+                    }}catch(e){{
+
+                        showStatus("❌ Error: "+e.message,"error");
+
+                        console.error(e);
+
+                    }}
+
+                }}
+
+
+                // Track user location
+
+                document.getElementById("location-btn").addEventListener("click",()=>{{
+
+                    if(watchId){{
+
+                        navigator.geolocation.clearWatch(watchId);
+
+                        watchId=null;
+
+                        if(userMarker)map.removeLayer(userMarker);
+
+                        document.getElementById("location-btn").textContent="📍";
+
+                        speak("Location tracking stopped");
+
+                    }}else{{
+
+                        if(navigator.geolocation){{
+
+                            showStatus("📍 Tracking location...","info");
+
+                            speak("Location tracking enabled");
+
+                            document.getElementById("location-btn").textContent="🛑";
+
+
+                            watchId=navigator.geolocation.watchPosition(
+
+                                pos=>{{
+
+                                    const lat=pos.coords.latitude;
+
+                                    const lon=pos.coords.longitude;
+
+
+                                    if(userMarker)map.removeLayer(userMarker);
+
+                                    userMarker=L.marker([lat,lon],{{
+
+                                        icon:L.divIcon({{
+
+                                            className:"user-location",
+
+                                            html:"<div style=\\"width:20px;height:20px;background:#4CAF50;border:3px solid white;border-radius:50%;box-shadow:0 0 10px rgba(0,0,0,0.5)\\"></div>"
+
+                                        }})
+
+                                    }}).addTo(map).bindPopup("📍 You are here");
+
+
+                                    map.setView([lat,lon],map.getZoom());
+
+                                }},
+
+                                err=>{{showStatus("❌ Location denied","error");watchId=null;}},
+
+                                {{enableHighAccuracy:true,maximumAge:10000,timeout:5000}}
+
+                            );
+
+                        }}else{{
+
+                            showStatus("❌ Geolocation not supported","error");
+
+                        }}
+
+                    }}
+
+                }});
+
+
+                getRoute();
+
+            </script>
+
+        </body>
+
+        </html>'>
+
+            </iframe>
+
+        </div>
+
+            """
+
+            info = f"""🧭 **Navigation:** {origin} → {destination}
+
+
+        ✅ **Features:**
+
+        - 🛣️ Real-time routing (OSRM - FREE)
+
+        - 🔊 Voice turn-by-turn guidance
+
+        - 📍 Live location tracking
+
+        - 📏 Distance & time estimates
+
+        - 🗺️ Interactive route visualization
+
+
+        💡 **Tip:** 
+
+        1. Click **🔊 Enable Voice** for audio guidance
+
+        2. Click **📍** button to track your location
+
+        3. Scroll the side panel to see all directions
+
+        """
+
+            if current_user["is_guest"]:
+
+                add_to_guest_history("maps", f"{origin}→{destination}", "Navigation", {"service": "OSRM"})
+
             else:
-                nearby_location, error1 = validate_location_input(nearby_location, "location")
-                if error1:
-                    return "", error1
-                location_text = nearby_location
-                js_safe_loc = nearby_location.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
 
-            js_safe_type = nearby_type.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
+                save_interaction_to_db("maps", f"{origin}→{destination}", "Navigation", {"service": "OSRM"})
 
-            # ✅ CRITICAL FIX: Increased timeout to 60 seconds for GPS requests
-            map_html = f'''
-<div style="width: 100%; height: 650px; position: relative;">
-    <iframe style="width:100%;height:100%;border:none;background-color:#e5e3df" 
-            srcdoc="<!DOCTYPE html>
+                increment_usage("maps")
+
+            return map_html, info
+
+        else:  # Find Nearby
+            if not nearby_location:
+                return "", "❌ Please enter a location."
+
+            safe_loc = nearby_location.replace('"', '\\"').replace("'", "\\'").strip()
+
+            map_html = f"""
+<div style="width: 100%; height: 650px;">
+    <iframe style="width:100%;height:100%;border:none" 
+            srcdoc='<!DOCTYPE html>
 <html>
 <head>
-    <meta charset=&quot;utf-8&quot;>
-    <link rel=&quot;stylesheet&quot; href=&quot;https://unpkg.com/leaflet@1.9.4/dist/leaflet.css&quot;/>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
     <style>
-        body{{margin:0;padding:0;background:#e5e3df}}
+        body{{margin:0;padding:0}}
         #map{{width:100%;height:600px}}
-        #status{{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:#2196F3;color:white;padding:12px 24px;border-radius:8px;z-index:1000;font-size:15px;box-shadow:0 4px 12px rgba(0,0,0,0.4);white-space:nowrap}}
+        #status{{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:#2196F3;color:white;padding:10px 20px;border-radius:5px;z-index:1000;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.3)}}
         .success{{background:#4CAF50!important}}
         .error{{background:#f44336!important}}
-        .info{{background:#FF9800!important}}
     </style>
 </head>
 <body>
-    <div id=&quot;status&quot;>🔍 Initializing...</div>
-    <div id=&quot;map&quot;></div>
-    <script src=&quot;https://unpkg.com/leaflet@1.9.4/dist/leaflet.js&quot;></script>
+    <div id="status">🔍 Searching...</div>
+    <div id="map"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        const LOC = '{js_safe_loc}';
-        const TYPE = '{js_safe_type}';
-        const USE_GPS = {str(use_gps).lower()};
-        const s = document.getElementById('status');
+        const LOC="{safe_loc}";
+        const TYPE="{nearby_type}";
+        const s=document.getElementById("status");
 
-        function show(t, c) {{
-            s.textContent = t;
-            s.className = c;
-            s.style.display = 'block';
+        function show(t,c){{
+            s.textContent=t;
+            s.className=c;
+            s.style.display="block";
+            if(c==="success")setTimeout(()=>s.style.display="none",3000);
         }}
 
-        const map = L.map('map').setView([20, 0], 2);
-        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            maxZoom: 19
-        }}).addTo(map);
+        const m=L.map("map").setView([20,0],2);
+        L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",{{maxZoom:19}}).addTo(m);
 
-        // GPS location marker (blue dot)
-        const gpsIcon = L.divIcon({{
-            className: '',
-            html: `<div style=&quot;width:20px;height:20px;background:#4285f4;border:4px solid white;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,0.4);&quot;></div>`,
-            iconSize: [20, 20],
-            iconAnchor: [10, 10]
-        }});
+        (async()=>{{
+            try{{
+                show("🔍 Finding location...","");
 
-        async function searchNearby(lat, lon, locationName) {{
-            try {{
-                map.setView([lat, lon], 14);
+                const locResp=await fetch("https://nominatim.openstreetmap.org/search?format=json&q="+encodeURIComponent(LOC)+"&limit=1",{{
+                    headers:{{"User-Agent":"AllMindApp/1.0"}}
+                }});
+                const locData=await locResp.json();
 
-                // Add blue marker for user's location
-                L.marker([lat, lon], {{ icon: gpsIcon }})
-                    .addTo(map)
-                    .bindPopup('<b>📍 ' + locationName + '</b>')
-                    .openPopup();
-
-                show('🔍 Finding nearby ' + TYPE + '...', '');
-
-                // ✅ SMART SEARCH: Try multiple methods
-                let found = false;
-
-                // Method 1: Try Overpass API with flexible query
-                try {{
-                    const overpassQuery = `
-                        [out:json][timeout:25];
-                        (
-                          node["name"~"${{TYPE}}",i](around:3000,${{lat}},${{lon}});
-                          node["amenity"~"${{TYPE}}",i](around:3000,${{lat}},${{lon}});
-                          node["shop"~"${{TYPE}}",i](around:3000,${{lat}},${{lon}});
-                          node["leisure"~"${{TYPE}}",i](around:3000,${{lat}},${{lon}});
-                          way["name"~"${{TYPE}}",i](around:3000,${{lat}},${{lon}});
-                          way["amenity"~"${{TYPE}}",i](around:3000,${{lat}},${{lon}});
-                          way["shop"~"${{TYPE}}",i](around:3000,${{lat}},${{lon}});
-                        );
-                        out center 20;
-                    `;
-
-                    const poiResp = await fetch(
-                        'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(overpassQuery),
-                        {{ headers: {{ 'User-Agent': 'AllMindApp/1.0' }} }}
-                    );
-                    const poiData = await poiResp.json();
-
-                    if (poiData.elements && poiData.elements.length > 0) {{
-                        poiData.elements.forEach(p => {{
-                            const pLat = p.lat || (p.center && p.center.lat);
-                            const pLon = p.lon || (p.center && p.center.lon);
-                            if (pLat && pLon) {{
-                                const name = p.tags.name || p.tags.amenity || p.tags.shop || 'Unnamed';
-                                L.marker([pLat, pLon]).addTo(map).bindPopup('<b>' + name + '</b>');
-                            }}
-                        }});
-                        show('✅ Found ' + poiData.elements.length + ' results for: ' + TYPE, 'success');
-                        found = true;
-                    }}
-                }} catch (e) {{
-                    console.log('Overpass search error:', e);
+                if(!locData||locData.length===0){{
+                    show("❌ Location not found","error");
+                    return;
                 }}
 
-                // Method 2: Fallback to Nominatim search
-                if (!found) {{
-                    const searchQuery = TYPE + ' near ' + locationName;
-                    const nomResp = await fetch(
-                        'https://nominatim.openstreetmap.org/search?format=json&q=' + 
-                        encodeURIComponent(searchQuery) + '&limit=10',
-                        {{ headers: {{ 'User-Agent': 'AllMindApp/1.0' }} }}
-                    );
-                    const nomData = await nomResp.json();
+                const lat=parseFloat(locData[0].lat);
+                const lon=parseFloat(locData[0].lon);
 
-                    if (nomData && nomData.length > 0) {{
-                        nomData.forEach(place => {{
-                            const pLat = parseFloat(place.lat);
-                            const pLon = parseFloat(place.lon);
-                            L.marker([pLat, pLon]).addTo(map)
-                                .bindPopup('<b>' + place.display_name + '</b>');
-                        }});
-                        show('✅ Found ' + nomData.length + ' results for: ' + TYPE, 'success');
-                        found = true;
-                    }}
+                m.setView([lat,lon],14);
+                L.marker([lat,lon]).addTo(m).bindPopup("<b>"+LOC+"</b>").openPopup();
+
+                show("🔍 Finding nearby "+TYPE+"...","");
+
+                const typeMap={{
+                    "restaurant":"amenity=restaurant",
+                    "hotel":"tourism=hotel",
+                    "cafe":"amenity=cafe",
+                    "hospital":"amenity=hospital",
+                    "gas_station":"amenity=fuel",
+                    "pharmacy":"amenity=pharmacy",
+                    "atm":"amenity=atm",
+                    "bank":"amenity=bank"
+                }};
+
+                const osmType=typeMap[TYPE]||"amenity=restaurant";
+
+                const overpassQuery=`
+                    [out:json][timeout:25];
+                    (
+                      node["${{osmType}}"](around:3000,${{lat}},${{lon}});
+                      way["${{osmType}}"](around:3000,${{lat}},${{lon}});
+                    );
+                    out center;
+                `;
+
+                const poiResp=await fetch("https://overpass-api.de/api/interpreter",{{
+                    method:"POST",
+                    headers:{{"Content-Type":"application/x-www-form-urlencoded"}},
+                    body:"data="+encodeURIComponent(overpassQuery)
+                }});
+
+                const poiData=await poiResp.json();
+
+                if(!poiData.elements||poiData.elements.length===0){{
+                    show("❌ No "+TYPE+" found nearby","error");
+                    return;
                 }}
 
-                if (!found) {{
-                    show('❌ No results found for: ' + TYPE + '. Try different keywords.', 'error');
-                }}
-
-            }} catch (e) {{
-                console.error(e);
-                show('❌ Error: ' + e.message, 'error');
-            }}
-        }}
-
-        (async () => {{
-            try {{
-                if (USE_GPS) {{
-                    // ✅ USE GPS LOCATION - INCREASED TIMEOUT TO 60 SECONDS
-                    show('📍 Requesting location access...', 'info');
-
-                    if (!navigator.geolocation) {{
-                        show('❌ GPS not supported by your browser', 'error');
-                        return;
+                poiData.elements.forEach(p=>{{
+                    const lat=p.lat||(p.center?p.center.lat:null);
+                    const lon=p.lon||(p.center?p.center.lon:null);
+                    if(lat&&lon){{
+                        const name=p.tags?.name||"Unnamed "+TYPE;
+                        L.marker([lat,lon]).addTo(m).bindPopup("<b>"+name+"</b>");
                     }}
+                }});
 
-                    navigator.geolocation.getCurrentPosition(
-                        async (position) => {{
-                            const lat = position.coords.latitude;
-                            const lon = position.coords.longitude;
-                            console.log('✅ Got GPS location:', lat, lon);
+                show("✅ Found "+poiData.elements.length+" "+TYPE,"success");
 
-                            show('✅ Location detected! Searching nearby...', 'success');
-
-                            // Get location name from coordinates
-                            try {{
-                                const reverseResp = await fetch(
-                                    `https://nominatim.openstreetmap.org/reverse?format=json&lat=${{lat}}&lon=${{lon}}`,
-                                    {{ headers: {{ 'User-Agent': 'AllMindApp/1.0' }} }}
-                                );
-                                const reverseData = await reverseResp.json();
-                                const locationName = reverseData.display_name || 'Your Location';
-
-                                await searchNearby(lat, lon, locationName);
-                            }} catch (e) {{
-                                await searchNearby(lat, lon, 'Your Current Location');
-                            }}
-                        }},
-                        (error) => {{
-                            console.error('GPS Error:', error);
-                            let errorMsg = '❌ Location access denied';
-                            switch(error.code) {{
-                                case error.PERMISSION_DENIED:
-                                    errorMsg = '❌ Please allow location access to find nearby places';
-                                    break;
-                                case error.POSITION_UNAVAILABLE:
-                                    errorMsg = '❌ Location unavailable. Please enter location manually.';
-                                    break;
-                                case error.TIMEOUT:
-                                    errorMsg = '❌ Location request timeout. Click &quot;Use My Current Location&quot; again.';
-                                    break;
-                            }}
-                            show(errorMsg, 'error');
-                        }},
-                        {{
-                            enableHighAccuracy: true,
-                            timeout: 60000,  // ✅ INCREASED TO 60 SECONDS
-                            maximumAge: 0
-                        }}
-                    );
-
-                }} else {{
-                    // ✅ USE MANUAL LOCATION
-                    show('🔍 Finding location: ' + LOC, '');
-
-                    const locResp = await fetch(
-                        'https://nominatim.openstreetmap.org/search?format=json&q=' + 
-                        encodeURIComponent(LOC) + '&limit=1',
-                        {{ headers: {{ 'User-Agent': 'AllMindApp/1.0' }} }}
-                    );
-                    const locData = await locResp.json();
-
-                    if (!locData || locData.length === 0) {{
-                        show('❌ Location not found', 'error');
-                        return;
-                    }}
-
-                    const lat = parseFloat(locData[0].lat);
-                    const lon = parseFloat(locData[0].lon);
-
-                    await searchNearby(lat, lon, LOC);
-                }}
-
-            }} catch (e) {{
-                console.error(e);
-                show('❌ Error: ' + e.message, 'error');
+            }}catch(e){{
+                show("❌ Error: "+e.message,"error");
+                console.error("Detailed error:",e);
             }}
         }})();
     </script>
 </body>
-</html>">
+</html>'>
     </iframe>
 </div>
-'''
+            """
 
-            info = f"🔍 **Searching for:** {nearby_type} near {location_text}\n\n🗺️ **Service:** OpenStreetMap + Overpass API (FREE)\n\n💡 **Tip:** {'You can request your location as many times as needed - no timeout limits!' if use_gps else 'Using your current GPS location'}"
+            info = f"🔍 **Searching:** {nearby_type.replace('_', ' ')} near {nearby_location}\n\n🗺️ **Service:** Overpass API (FREE)"
 
             if current_user["is_guest"]:
-                add_to_guest_history("maps", f"{nearby_type}@{location_text}", "Nearby search",
-                                     {"service": "Overpass + Nominatim", "gps": use_gps})
+                add_to_guest_history("maps", f"{nearby_type}@{nearby_location}", "Nearby", {"service": "Overpass"})
             else:
-                save_interaction_to_db("maps", f"{nearby_type}@{location_text}", "Nearby search",
-                                       {"service": "Overpass + Nominatim", "gps": use_gps})
+                save_interaction_to_db("maps", f"{nearby_type}@{nearby_location}", "Nearby", {"service": "Overpass"})
                 increment_usage("maps")
 
             return map_html, info
@@ -4371,243 +4685,182 @@ def check_auth_status():
     })
 
 
-@flask_app.route("/firebase-auth", methods=["GET", "OPTIONS"])
+@flask_app.route("/firebase-auth", methods=["GET"])
 def firebase_auth_page():
     """Serve Firebase authentication page with proper config injection"""
-
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        response = flask_app.make_default_options_response()
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        return response
-
     logging.info("🔥 Firebase auth page requested")
-    logging.info(f"   Request from: {request.host}")
-    logging.info(f"   BASE_URL: {BASE_URL}")
-    logging.info(f"   API_BASE_URL: {API_BASE_URL}")
 
     # ✅ Get Firebase config
     config_str = json.dumps(firebase_config)
 
-    # ✅ Determine correct API base URL for this request
-    if IS_HUGGINGFACE:
-        api_url = f"https://{request.host}".replace(':7860', ':5000')
-    else:
-        api_url = "http://localhost:5000"
-
-    logging.info(f"   Using API URL: {api_url}")
-
-    # ✅ RETURN THE ACTUAL HTML PAGE
-    return f'''
+    # ✅ CORRECTED HTML with proper config injection
+    html_content = f"""
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>All Mind - Sign In</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firebase Authentication</title>
     <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             display: flex;
-            align-items: center;
             justify-content: center;
-            padding: 20px;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         }}
-        .container {{
+        .auth-container {{
             background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
             padding: 40px;
-            max-width: 400px;
-            width: 100%;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
             text-align: center;
-        }}
-        .logo {{
-            font-size: 48px;
-            margin-bottom: 10px;
+            max-width: 400px;
+            width: 90%;
         }}
         h1 {{
             color: #333;
             margin-bottom: 10px;
             font-size: 28px;
         }}
-        .subtitle {{
+        p {{
             color: #666;
             margin-bottom: 30px;
-            font-size: 14px;
         }}
-        .google-btn {{
-            background: white;
-            border: 2px solid #ddd;
-            border-radius: 8px;
-            padding: 14px 24px;
-            width: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            cursor: pointer;
+        #google-btn {{
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            padding: 14px 28px;
             font-size: 16px;
-            font-weight: 500;
-            color: #333;
-            transition: all 0.2s;
+            border-radius: 8px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(66, 133, 244, 0.4);
         }}
-        .google-btn:hover {{
-            background: #f8f9fa;
-            border-color: #4285f4;
+        #google-btn:hover {{
+            background-color: #357ae8;
             transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(66, 133, 244, 0.2);
+            box-shadow: 0 6px 16px rgba(66, 133, 244, 0.6);
         }}
-        .status {{
+        #google-btn:disabled {{
+            background-color: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }}
+        #status {{
             margin-top: 20px;
             padding: 12px;
             border-radius: 8px;
             font-size: 14px;
-            display: none;
         }}
-        .status.show {{
-            display: block;
-        }}
-        .status.loading {{
-            background: #e3f2fd;
-            color: #1976d2;
-        }}
-        .status.success {{
-            background: #e8f5e9;
-            color: #2e7d32;
-        }}
-        .status.error {{
-            background: #ffebee;
-            color: #c62828;
-        }}
-        .spinner {{
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #4285f4;
-            border-radius: 50%;
-            width: 24px;
-            height: 24px;
-            animation: spin 1s linear infinite;
-            display: inline-block;
-            margin-right: 8px;
-        }}
-        @keyframes spin {{
-            0% {{ transform: rotate(0deg); }}
-            100% {{ transform: rotate(360deg); }}
-        }}
+        .success {{ background-color: #d4edda; color: #155724; }}
+        .error {{ background-color: #f8d7da; color: #721c24; }}
+        .info {{ background-color: #d1ecf1; color: #0c5460; }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="logo">🤖</div>
-        <h1>Welcome to All Mind</h1>
-        <p class="subtitle">Sign in to access all features</p>
+    <div class="auth-container">
+        <h1>🔐 Sign In</h1>
+        <p>Sign in with your Google account</p>
 
-        <button class="google-btn" onclick="signInWithGoogle()">
-            <svg width="20" height="20" viewBox="0 0 48 48">
+        <button id="google-btn">
+            <svg width="18" height="18" viewBox="0 0 48 48">
                 <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
                 <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
                 <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
                 <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
             </svg>
-            Continue with Google
+            Sign in with Google
         </button>
 
-        <div class="status" id="status"></div>
+        <div id="status"></div>
     </div>
 
-    <script type="module">
-        import {{ initializeApp }} from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
-        import {{ getAuth, signInWithPopup, GoogleAuthProvider }} from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
 
+    <script>
+        // ✅ INJECT FIREBASE CONFIG FROM PYTHON
         const firebaseConfig = {config_str};
 
-        console.log('🔥 Initializing Firebase...');
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const provider = new GoogleAuthProvider();
+        console.log('🔥 Firebase Config:', firebaseConfig);
 
-        function showStatus(message, type) {{
-            const status = document.getElementById('status');
-            status.className = 'status show ' + type;
-            status.innerHTML = type === 'loading' ? 
-                '<span class="spinner"></span>' + message : message;
+        // Validate config
+        if (!firebaseConfig.apiKey || !firebaseConfig.authDomain) {{
+            document.getElementById('status').innerHTML = '❌ Firebase not configured properly';
+            document.getElementById('status').className = 'error';
+            throw new Error('Firebase config missing required fields');
         }}
 
-        window.signInWithGoogle = async function() {{
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const provider = new firebase.auth.GoogleAuthProvider();
+
+        console.log('✅ Firebase initialized successfully');
+
+        document.getElementById('google-btn').addEventListener('click', async () => {{
+            const btn = document.getElementById('google-btn');
+            const status = document.getElementById('status');
+
+            btn.disabled = true;
+            status.textContent = '⏳ Opening Google Sign-In...';
+            status.className = 'info';
+
             try {{
-                showStatus('Opening Google Sign-In...', 'loading');
-
-                const result = await signInWithPopup(auth, provider);
+                const result = await auth.signInWithPopup(provider);
                 const user = result.user;
+                const token = await user.getIdToken();
 
-                console.log('✅ Google Sign-In successful:', user.email);
-                showStatus('Signed in! Getting token...', 'loading');
+                console.log('✅ Signed in:', user.email);
 
-                const idToken = await user.getIdToken();
-                console.log('✅ Got Firebase ID token');
+                status.textContent = '✅ Signed in! Sending to server...';
+                status.className = 'success';
 
-                showStatus('Logging you in...', 'loading');
-
-                const response = await fetch('{api_url}/firebase-login', {{
+                // Send token to Flask backend
+                const response = await fetch('http://localhost:5000/firebase-login', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ token: idToken }})
+                    body: JSON.stringify({{ token }})
                 }});
 
                 const data = await response.json();
 
                 if (data.success) {{
-    console.log('✅ Backend login successful');
-    showStatus('✅ Success! Redirecting...', 'success');
+                    status.textContent = '✅ Success! Redirecting...';
+                    localStorage.setItem('firebase_login_event', JSON.stringify({{
+                        username: data.user.username,
+                        email: data.user.email,
+                        timestamp: Date.now()
+                    }}));
+                    setTimeout(() => {{
+                        window.close();
+                        window.opener.location.reload();
+                    }}, 1000);
+                }} else {{
+                    throw new Error(data.error || 'Unknown error');
+                }}
 
-    // ✅ CRITICAL FIX: Signal Gradio about login
-    localStorage.setItem('firebase_login_event', JSON.stringify({{
-        timestamp: Date.now(),
-        user: data.user
-    }}));
-
-    // ✅ FIX: Force parent window reload if opened in popup
-    if (window.opener) {{
-        window.opener.postMessage({{
-            type: 'FIREBASE_LOGIN_SUCCESS',
-            user: data.user
-        }}, '*');
-        
-        setTimeout(() => {{
-            window.close();
-            if (!window.closed) {{
-                // If popup didn't close, redirect
-                window.location.href = '{BASE_URL}';
+            }} catch (error) {{
+                console.error('❌ Error:', error);
+                status.textContent = '❌ Error: ' + error.message;
+                status.className = 'error';
+                btn.disabled = false;
             }}
-        }}, 500);
-    }} else {{
-        // ✅ FIX: If not a popup, force immediate reload
-        setTimeout(() => {{
-            window.location.replace('{BASE_URL}');
-        }}, 500);
-    }}
-}} else {{
-    throw new Error(data.error || 'Login failed');
-}}
-
-}} catch (error) {{
-    console.error('❌ Sign-in error:', error);
-    showStatus('❌ Error: ' + error.message, 'error');
-}}
-}};
-        console.log('✅ Firebase auth page ready');
+        }});
     </script>
 </body>
 </html>
-'''
+    """
+
+    return html_content
 
 @flask_app.route("/firebase-login", methods=["POST", "OPTIONS"])
 def firebase_login_endpoint():
@@ -4669,53 +4922,6 @@ def firebase_login_endpoint():
         response = jsonify({"success": False, "error": str(e)})
         response.headers.add("Access-Control-Allow-Origin", "*")
         return response, 500
-
-
-# ============================================================================
-# ✅✅✅ ADD THIS NEW ENDPOINT HERE ✅✅✅
-# ============================================================================
-
-@flask_app.route("/api/reverse-geocode", methods=["POST"])
-def reverse_geocode():
-    """Backend proxy for reverse geocoding (avoids CORS issues)"""
-    try:
-        data = request.get_json()
-        lat = data.get("lat")
-        lon = data.get("lon")
-
-        if not lat or not lon:
-            return jsonify({"success": False, "error": "Missing coordinates"}), 400
-
-        # Use backend to fetch from Nominatim (no CORS issues here)
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}"
-
-        response = requests.get(
-            url,
-            headers={"User-Agent": "AllMindApp/1.0"},
-            timeout=10
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            address = data.get("display_name", f"{lat}, {lon}")
-
-            return jsonify({
-                "success": True,
-                "address": address,
-                "full_data": data
-            }), 200
-        else:
-            return jsonify({
-                "success": False,
-                "error": f"Nominatim error: {response.status_code}"
-            }), response.status_code
-
-    except Exception as e:
-        logging.error(f"Reverse geocoding error: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
 
 # ------------------ GRADIO UI ------------------
 with gr.Blocks(title="All Mind") as demo:
@@ -4828,6 +5034,7 @@ with gr.Blocks(title="All Mind") as demo:
             history_chatbot = gr.Chatbot(
                 label="Activity Log (Your Data Only - Isolated)",
                 height=500,
+                type="tuples"
             )
 
             with gr.Row():
@@ -4849,7 +5056,7 @@ with gr.Blocks(title="All Mind") as demo:
             with gr.Row():
                 mic_chat = gr.Audio(sources=["microphone"], type="filepath", label="🎙️ Click to Record Voice")
 
-            chatbot = gr.Chatbot(label="Conversation", height=500)
+            chatbot = gr.Chatbot(label="Conversation", height=500, type="tuples")
 
             user_input = gr.Textbox(placeholder="Enter your message here... or use voice input above",
                                     label="Type your message")
@@ -5100,27 +5307,17 @@ with gr.Blocks(title="All Mind") as demo:
                 )
 
             with gr.Row():
-                use_location_btn = gr.Button(
-                    "📍 Use My Current Location",
-                    variant="secondary",
-                    visible=False,
-                    size="sm"
-                )
-
-            with gr.Row():
                 nearby_location = gr.Textbox(
-                    label="📍 Detected Location (or enter manually)",
-                    placeholder="Click 'Use My Current Location' above or type a location manually",
-                    visible=False,
-                    interactive=True
-                )
-                nearby_type = gr.Textbox(
-                    label="🔍 Search for (e.g., 'pizza', 'gym', 'school', 'park')",
-                    placeholder="Enter any place type: restaurant, hotel, cafe, gym, school, park, etc.",
+                    label="📍 Location",
+                    placeholder="e.g., 'London' or 'Tokyo'",
                     visible=False
                 )
-
-            location_status = gr.Markdown("", visible=False)
+                nearby_type = gr.Dropdown(
+                    choices=["restaurant", "hotel", "cafe", "hospital", "gas_station", "pharmacy", "atm", "bank"],
+                    value="restaurant",
+                    label="🔍 Find Nearby",
+                    visible=False
+                )
 
             map_btn = gr.Button("🗺️ Show Map", variant="primary", size="lg")
 
@@ -5131,9 +5328,7 @@ with gr.Blocks(title="All Mind") as demo:
                 examples=[
                     ["Search Location", "Taj Mahal, India", "", "", "", ""],
                     ["Get Directions", "", "Times Square, New York", "Central Park, New York", "", ""],
-                    ["Find Nearby", "", "", "", "", "pizza"],  # ✅ Empty location = use GPS
-                    ["Find Nearby", "", "", "", "London", "gym"],  # ✅ With manual location
-                    ["Find Nearby", "", "", "", "", "coffee"],  # ✅ GPS + coffee
+                    ["Find Nearby", "", "", "", "Paris, France", "restaurant"],
                 ],
                 inputs=[map_mode, location_input, origin_input, destination_input, nearby_location, nearby_type],
                 label="💡 Try These Examples"
@@ -5147,127 +5342,35 @@ with gr.Blocks(title="All Mind") as demo:
                         gr.update(visible=True),  # location_input
                         gr.update(visible=False),  # origin_input
                         gr.update(visible=False),  # destination_input
-                        gr.update(visible=False),  # use_location_btn
                         gr.update(visible=False),  # nearby_location
-                        gr.update(visible=False),  # nearby_type
-                        gr.update(visible=False)  # location_status
+                        gr.update(visible=False)  # nearby_type
                     )
                 elif mode == "Get Directions":
                     return (
                         gr.update(visible=False),  # location_input
                         gr.update(visible=True),  # origin_input
                         gr.update(visible=True),  # destination_input
-                        gr.update(visible=False),  # use_location_btn
                         gr.update(visible=False),  # nearby_location
-                        gr.update(visible=False),  # nearby_type
-                        gr.update(visible=False)  # location_status
+                        gr.update(visible=False)  # nearby_type
                     )
                 else:  # Find Nearby
                     return (
                         gr.update(visible=False),  # location_input
                         gr.update(visible=False),  # origin_input
                         gr.update(visible=False),  # destination_input
-                        gr.update(visible=True),  # use_location_btn
                         gr.update(visible=True),  # nearby_location
-                        gr.update(visible=True),  # nearby_type
-                        gr.update(visible=True)  # location_status
+                        gr.update(visible=True)  # nearby_type
                     )
 
 
             map_mode.change(
                 update_map_inputs,
                 inputs=map_mode,
-                outputs=[location_input, origin_input, destination_input, use_location_btn, nearby_location,
-                         nearby_type, location_status]
-            )
-
-            # GPS location fetcher with JavaScript
-            use_location_btn.click(
-                fn=None,
-                inputs=None,
-                outputs=[nearby_location, location_status],
-                js="""
-                async () => {
-                    console.log('📍 GPS location requested by user');
-
-                    if (!navigator.geolocation) {
-                        return ['', '❌ GPS not supported by your browser'];
-                    }
-
-                    return new Promise((resolve) => {
-                        navigator.geolocation.getCurrentPosition(
-                            async (position) => {
-                                const lat = position.coords.latitude;
-                                const lon = position.coords.longitude;
-
-                                console.log('✅ GPS coordinates:', lat, lon);
-
-                                // ✅ Use backend proxy to avoid CORS
-                                try {
-                                    const response = await fetch(window.location.origin.replace('7860', '5000') + '/api/reverse-geocode', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ lat, lon })
-                                    });
-
-                                    if (response.ok) {
-                                        const data = await response.json();
-
-                                        if (data.success) {
-                                            const address = data.address;
-                                            console.log('✅ Location detected:', address);
-
-                                            resolve([
-                                                address,
-                                                `✅ Location detected: ${address.substring(0, 100)}...`
-                                            ]);
-                                        } else {
-                                            throw new Error(data.error || 'Reverse geocoding failed');
-                                        }
-                                    } else {
-                                        throw new Error(`Backend error: ${response.status}`);
-                                    }
-
-                                } catch (error) {
-                                    console.error('Reverse geocoding failed:', error);
-                                    // Fallback to coordinates if backend fails
-                                    resolve([
-                                        `${lat}, ${lon}`,
-                                        `✅ Location: ${lat.toFixed(4)}, ${lon.toFixed(4)} (Address lookup failed)`
-                                    ]);
-                                }
-                            },
-                            (error) => {
-                                console.error('GPS error:', error);
-                                let errorMsg = '❌ Location access denied';
-
-                                switch(error.code) {
-                                    case error.PERMISSION_DENIED:
-                                        errorMsg = '❌ Please allow location access in your browser';
-                                        break;
-                                    case error.POSITION_UNAVAILABLE:
-                                        errorMsg = '❌ Location unavailable. Please check your GPS settings';
-                                        break;
-                                    case error.TIMEOUT:
-                                        errorMsg = '❌ Location request timeout. Please try again';
-                                        break;
-                                }
-
-                                resolve(['', errorMsg]);
-                            },
-                            {
-                                enableHighAccuracy: true,
-                                timeout: 30000, 
-                                maximumAge: 0
-                            }
-                        );
-                    });
-                }
-                """
+                outputs=[location_input, origin_input, destination_input, nearby_location, nearby_type]
             )
 
             map_btn.click(
-                generate_ultra_robust_map,
+                generate_ultra_robust_map,  # ← CHANGED THIS
                 inputs=[map_mode, location_input, origin_input, destination_input, nearby_location, nearby_type],
                 outputs=[map_output, map_info]
             )
@@ -5438,7 +5541,7 @@ with gr.Blocks(title="All Mind") as demo:
                 let pollInterval = null;
                 let localStorageInterval = null;
 
-                const authCheckUrl = window.location.origin.replace('7860', '5000') + '/api/check_auth';
+                const authCheckUrl = 'http://localhost:5000/api/check_auth';
 
                 // Function to stop all polling
                 function stopPolling() {
@@ -5489,33 +5592,24 @@ with gr.Blocks(title="All Mind") as demo:
                 pollInterval = setInterval(checkAuth, 1000);
 
                 // Check localStorage for instant Firebase login
-                // ✅ ENHANCED: Listen for postMessage from popup
-window.addEventListener('message', (event) => {
-    if (event.data.type === 'FIREBASE_LOGIN_SUCCESS' && !window.isLoggedIn) {
-        console.log('✅ Received postMessage from Firebase popup!');
-        reloadOnce();
-    }
-});
+                localStorageInterval = setInterval(() => {
+                    const loginEvent = localStorage.getItem('firebase_login_event');
+                    if (loginEvent && !window.isLoggedIn) {
+                        try {
+                            const data = JSON.parse(loginEvent);
 
-// Check localStorage for instant Firebase login
-localStorageInterval = setInterval(() => {
-    const loginEvent = localStorage.getItem('firebase_login_event');
-    if (loginEvent && !window.isLoggedIn) {
-        try {
-            const data = JSON.parse(loginEvent);
-
-            if (Date.now() - data.timestamp < 10000) {
-                console.log('✅ Fresh Firebase login event detected!');
-                localStorage.removeItem('firebase_login_event');
-                reloadOnce();
-            } else {
-                localStorage.removeItem('firebase_login_event');
-            }
-        } catch (e) {
-            localStorage.removeItem('firebase_login_event');
-        }
-    }
-}, 500);
+                            if (Date.now() - data.timestamp < 10000) {
+                                console.log('✅ Fresh Firebase login event detected!');
+                                localStorage.removeItem('firebase_login_event');
+                                reloadOnce();
+                            } else {
+                                localStorage.removeItem('firebase_login_event');
+                            }
+                        } catch (e) {
+                            localStorage.removeItem('firebase_login_event');
+                        }
+                    }
+                }, 500);
             }
             """
     )
