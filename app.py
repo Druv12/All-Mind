@@ -23,8 +23,8 @@ import tempfile
 import logging
 from PIL import Image, ImageDraw, ImageFont
 from gtts import gTTS
-import argostranslate.package
-import argostranslate.translate
+#import argostranslate.package
+#import argostranslate.translate
 # Correct import (one line)
 from langdetect import detect, DetectorFactory
 import logging
@@ -40,6 +40,15 @@ import smtplib
 import queue
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from textwrap import dedent
+
+# Web Search functionality
+try:
+    from bs4 import BeautifulSoup
+    WEB_SEARCH_AVAILABLE = True
+except ImportError:
+    logging.warning("⚠️ BeautifulSoup not installed. Install with: pip install beautifulsoup4")
+    WEB_SEARCH_AVAILABLE = False
 
 # Detect environment and set base URL
 SPACE_ID = os.getenv("SPACE_ID")
@@ -63,9 +72,17 @@ CORS(flask_app, resources={
 })
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# ================================
+# RAG SYSTEM IMPORTS
+# ================================
+from rag_system_enhanced import EnterpriseRAG
+from guardrails import ResponseGuardrails, validate_and_format
+
 MONGODB_URI = os.getenv("MONGODB_URI")
 import traceback
-
+print("\n" + "=" * 80)
+print("🚀 STEP 1: Starting script...")
+print("=" * 80)
 # Now you can safely set the seed
 DetectorFactory.seed = 0  # Makes detection consistent across runs
 
@@ -136,12 +153,23 @@ try:
     MONGODB_AVAILABLE = True
 except ImportError:
     logging.warning("⚠️ pymongo not found. Install with: pip install pymongo")
-    MONGODB_AVAILABLE = False
+    MONGODB_AVAILABLE = True
+
+
+# Code Executor Setup - ADD THIS BLOCK
+CODE_EXECUTOR_AVAILABLE = False
+try:
+    from code_executor import CodeExecutor  # Note: underscore in filename
+    CODE_EXECUTOR_AVAILABLE = True
+    logging.info("✅ Code Executor available")
+except ImportError:
+    logging.warning("⚠️ Code Executor not available - create code_executor.py")
+    CODE_EXECUTOR_AVAILABLE = False
 
 # ================================
 # FIREBASE ADMIN SDK SETUP
 # ================================
-FIREBASE_AVAILABLE = False
+FIREBASE_AVAILABLE = True
 
 try:
     # Option 1: Try service account file path from environment
@@ -224,6 +252,10 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 db = None
 users_collection = None
 
+# --- MongoDB Setup ---
+db = None
+users_collection = None
+
 if MONGODB_AVAILABLE:
     try:
         MONGODB_URI = os.getenv("MONGODB_URI")
@@ -239,6 +271,19 @@ if MONGODB_AVAILABLE:
     except Exception as e:
         logging.error(f"❌ MongoDB connection failed: {e}")
         MONGODB_AVAILABLE = False
+
+# ================================
+# RAG SYSTEM INITIALIZATION
+# ================================
+rag_system = None
+try:
+    rag_system = EnterpriseRAG()
+    logging.info("✅ RAG System initialized successfully")
+    print("🔥 DEBUG: RAG System initialized:", rag_system)
+except Exception as e:
+    logging.error(f"❌ RAG System initialization failed: {e}")
+    logging.error(traceback.format_exc())
+    print("❌ DEBUG: RAG initialization failed:", e)
 
 # --- External Library Imports ---
 try:
@@ -338,65 +383,65 @@ def notify_gradio_login(user_data):
 # ================================
 #  LANGUAGE TRANSLATION MODULE
 # ================================
-# --- Cache for installed languages ---
-INSTALLED_LANGS = {}
-
-
-def _ensure_language_pack(source_code: str, target_code: str):
-    """Download language pack if not already installed."""
-    pack_key = f"{source_code}->{target_code}"
-
-    if pack_key in INSTALLED_LANGS:
-        return INSTALLED_LANGS[pack_key]
-
-    # Update package index
-    argostranslate.package.update_package_index()
-    available_packages = argostranslate.package.get_available_packages()
-
-    # Find package: source → target
-    package_to_install = next(
-        (pkg for pkg in available_packages
-         if pkg.from_code == source_code and pkg.to_code == target_code),
-        None
-    )
-
-    if package_to_install is None:
-        # Try to find via English as intermediate
-        logging.warning(f"Direct {source_code}->{target_code} not found. Trying via English...")
-
-        # Install source -> en
-        pkg_to_en = next(
-            (pkg for pkg in available_packages
-             if pkg.from_code == source_code and pkg.to_code == "en"),
-            None
-        )
-
-        # Install en -> target
-        pkg_from_en = next(
-            (pkg for pkg in available_packages
-             if pkg.from_code == "en" and pkg.to_code == target_code),
-            None
-        )
-
-        if pkg_to_en:
-            download_path = pkg_to_en.download()
-            argostranslate.package.install_from_path(download_path)
-            logging.info(f"Installed intermediate pack: {source_code}->en")
-
-        if pkg_from_en:
-            download_path = pkg_from_en.download()
-            argostranslate.package.install_from_path(download_path)
-            logging.info(f"Installed intermediate pack: en->{target_code}")
-
-        INSTALLED_LANGS[pack_key] = True
-        return True
-
-    # Direct package found - install it
-    download_path = package_to_install.download()
-    argostranslate.package.install_from_path(download_path)
-    INSTALLED_LANGS[pack_key] = True
-    logging.info(f"Installed Argos language pack: {source_code}->{target_code}")
-    return True
+# # --- Cache for installed languages ---
+# INSTALLED_LANGS = {}
+#
+#
+# def _ensure_language_pack(source_code: str, target_code: str):
+#     """Download language pack if not already installed."""
+#     pack_key = f"{source_code}->{target_code}"
+#
+#     if pack_key in INSTALLED_LANGS:
+#         return INSTALLED_LANGS[pack_key]
+#
+#     # Update package index
+#     argostranslate.package.update_package_index()
+#     available_packages = argostranslate.package.get_available_packages()
+#
+#     # Find package: source → target
+#     package_to_install = next(
+#         (pkg for pkg in available_packages
+#          if pkg.from_code == source_code and pkg.to_code == target_code),
+#         None
+#     )
+#
+#     if package_to_install is None:
+#         # Try to find via English as intermediate
+#         logging.warning(f"Direct {source_code}->{target_code} not found. Trying via English...")
+#
+#         # Install source -> en
+#         pkg_to_en = next(
+#             (pkg for pkg in available_packages
+#              if pkg.from_code == source_code and pkg.to_code == "en"),
+#             None
+#         )
+#
+#         # Install en -> target
+#         pkg_from_en = next(
+#             (pkg for pkg in available_packages
+#              if pkg.from_code == "en" and pkg.to_code == target_code),
+#             None
+#         )
+#
+#         if pkg_to_en:
+#             download_path = pkg_to_en.download()
+#             argostranslate.package.install_from_path(download_path)
+#             logging.info(f"Installed intermediate pack: {source_code}->en")
+#
+#         if pkg_from_en:
+#             download_path = pkg_from_en.download()
+#             argostranslate.package.install_from_path(download_path)
+#             logging.info(f"Installed intermediate pack: en->{target_code}")
+#
+#         INSTALLED_LANGS[pack_key] = True
+#         return True
+#
+#     # Direct package found - install it
+#     download_path = package_to_install.download()
+#     argostranslate.package.install_from_path(download_path)
+#     INSTALLED_LANGS[pack_key] = True
+#     logging.info(f"Installed Argos language pack: {source_code}->{target_code}")
+#     return True
 
 
 def translate_text(text: str, target_lang: str = "es", source_lang: str = "auto") -> str:
@@ -480,47 +525,47 @@ def translate_text(text: str, target_lang: str = "es", source_lang: str = "auto"
     except Exception as e:
         logging.warning(f"MyMemory Translation failed: {e}")
 
-    # ============================================================
-    # METHOD 4: ArgosTranslate (OFFLINE fallback) - FIXED
-    # ============================================================
-    try:
-        logging.info("🌐 Trying ArgosTranslate (OFFLINE)...")
-
-        # Safely try to install language pack
-        try:
-            _ensure_language_pack(source_lang, target_lang)
-        except Exception as pack_error:
-            logging.warning(f"ArgosTranslate pack install failed: {pack_error}")
-            raise Exception("Skipping ArgosTranslate")
-
-        installed_languages = argostranslate.translate.get_installed_languages()
-        from_lang = next((lang for lang in installed_languages if lang.code == source_lang), None)
-        to_lang = next((lang for lang in installed_languages if lang.code == target_lang), None)
-
-        # Try direct translation
-        if from_lang and to_lang:
-            translation = from_lang.get_translation(to_lang)
-            if translation:
-                translated = translation.translate(text)
-                logging.info(f"✅ ArgosTranslate direct: {source_lang}->{target_lang}")
-                return translated.strip()
-
-        # Try via English if direct not available
-        en_lang = next((lang for lang in installed_languages if lang.code == "en"), None)
-        if en_lang and from_lang and to_lang:
-            trans_to_en = from_lang.get_translation(en_lang)
-            if trans_to_en:
-                intermediate_text = trans_to_en.translate(text)
-                trans_from_en = en_lang.get_translation(to_lang)
-                if trans_from_en:
-                    translated = trans_from_en.translate(intermediate_text)
-                    logging.info(f"✅ ArgosTranslate via English: {source_lang}->en->{target_lang}")
-                    return translated.strip()
-
-    except Exception as e:
-        logging.warning(f"ArgosTranslate skipped: {e}")
-
-    return f"[Translation temporarily unavailable. Gemini quota exceeded. Try again in 60 seconds.]"
+    # # ============================================================
+    # # METHOD 4: ArgosTranslate (OFFLINE fallback) - FIXED
+    # # ============================================================
+    # try:
+    #     logging.info("🌐 Trying ArgosTranslate (OFFLINE)...")
+    #
+    #     # Safely try to install language pack
+    #     try:
+    #         _ensure_language_pack(source_lang, target_lang)
+    #     except Exception as pack_error:
+    #         logging.warning(f"ArgosTranslate pack install failed: {pack_error}")
+    #         raise Exception("Skipping ArgosTranslate")
+    #
+    #     installed_languages = argostranslate.translate.get_installed_languages()
+    #     from_lang = next((lang for lang in installed_languages if lang.code == source_lang), None)
+    #     to_lang = next((lang for lang in installed_languages if lang.code == target_lang), None)
+    #
+    #     # Try direct translation
+    #     if from_lang and to_lang:
+    #         translation = from_lang.get_translation(to_lang)
+    #         if translation:
+    #             translated = translation.translate(text)
+    #             logging.info(f"✅ ArgosTranslate direct: {source_lang}->{target_lang}")
+    #             return translated.strip()
+    #
+    #     # Try via English if direct not available
+    #     en_lang = next((lang for lang in installed_languages if lang.code == "en"), None)
+    #     if en_lang and from_lang and to_lang:
+    #         trans_to_en = from_lang.get_translation(en_lang)
+    #         if trans_to_en:
+    #             intermediate_text = trans_to_en.translate(text)
+    #             trans_from_en = en_lang.get_translation(to_lang)
+    #             if trans_from_en:
+    #                 translated = trans_from_en.translate(intermediate_text)
+    #                 logging.info(f"✅ ArgosTranslate via English: {source_lang}->en->{target_lang}")
+    #                 return translated.strip()
+    #
+    # except Exception as e:
+    #     logging.warning(f"ArgosTranslate skipped: {e}")
+    #
+    # return f"[Translation temporarily unavailable. Gemini quota exceeded. Try again in 60 seconds.]"
 
 
 def speak_translation(text: str, lang: str):
@@ -666,6 +711,89 @@ def perform_translation(text, target_lang):
         f"**Original ({source_lang}):** {text}\n\n**Translated ({target_lang}):** {translated}"
     )
 
+
+# ================================
+# WEB SEARCH FUNCTIONS
+# ================================
+
+def search_web(query: str, num_results: int = 5) -> list:
+    """Search DuckDuckGo and return results"""
+    if not WEB_SEARCH_AVAILABLE:
+        return []
+
+    try:
+        search_url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        response = requests.get(search_url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        results = []
+        for result in soup.find_all('div', class_='result')[:num_results]:
+            try:
+                title_elem = result.find('a', class_='result__a')
+                snippet_elem = result.find('a', class_='result__snippet')
+                if title_elem:
+                    results.append({
+                        'title': title_elem.get_text(strip=True),
+                        'url': title_elem.get('href', ''),
+                        'snippet': snippet_elem.get_text(strip=True) if snippet_elem else ''
+                    })
+            except Exception as e:
+                logging.debug(f"Error parsing result: {e}")
+                continue
+
+        logging.info(f"✅ Web search for '{query}': found {len(results)} results")
+        return results
+    except Exception as e:
+        logging.error(f"Web search error: {e}")
+        return []
+
+
+def fetch_webpage_content(url: str, max_length: int = 3000) -> str:
+    """Fetch and extract main text content from webpage"""
+    if not WEB_SEARCH_AVAILABLE:
+        return ""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        for script in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+            script.decompose()
+
+        text = soup.get_text(separator='\n', strip=True)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        text = '\n'.join(lines)
+        return text[:max_length]
+    except Exception as e:
+        logging.error(f"Webpage fetch error for {url}: {e}")
+        return ""
+
+
+def perform_web_search(query: str) -> str:
+    """Perform web search and return formatted results"""
+    if current_user["is_guest"]:
+        return "🔒 **Register to use web search.**"
+    if not WEB_SEARCH_AVAILABLE:
+        return "❌ Web search unavailable. Install: `pip install beautifulsoup4`"
+    if not query or not query.strip():
+        return "Please enter a search query."
+
+    results = search_web(query, num_results=5)
+    if not results:
+        return f"No results found for: **{query}**"
+
+    output = f"# 🔍 Search Results for: {query}\n\n"
+    for i, result in enumerate(results, 1):
+        output += f"## {i}. {result['title']}\n"
+        output += f"**URL:** {result['url']}\n"
+        output += f"{result['snippet']}\n\n---\n\n"
+
+    if current_user.get("logged_in"):
+        save_interaction_to_db("web_search", query, output, {"num_results": len(results)})
+    return output
 
 # --- User Authentication Functions ---
 def hash_password(password):
@@ -1090,11 +1218,15 @@ def start_as_guest():
         # 10. translation_tab
         gr.update(visible=False),
 
-        # 11. maps_tab
+        # 11. web_search_tab
+        gr.update(visible=False),
+
+        # 12. maps_tab
         gr.update(visible=False),
 
         # 12. stats_btn (Button) – hidden for guests
         gr.update(visible=False),
+
 
         # 13. history_chatbot (Chatbot) – empty
         [],
@@ -1140,6 +1272,7 @@ def check_auth_and_load():
             gr.update(visible=True),  # image_search_tab
             gr.update(visible=True),  # video_gen_tab
             gr.update(visible=True),  # translation_tab
+            gr.update(visible=True),  # web_search_tab
             gr.update(visible=True),  # maps_tab
             gr.update(visible=True),  # stats_btn
             [],  # history_chatbot
@@ -1183,63 +1316,94 @@ print("authDomain present:", bool(firebase_config.get("authDomain")))
 print("projectId present:", bool(firebase_config.get("projectId")))
 print("=" * 80)
 
+# Update URLs to use port 7860 instead of 5000
 register_html = """
     <div style="padding: 20px; text-align: center;">
-        <a href="http://localhost:5000/firebase-auth?action=register" target="_blank" style="
-            background-color: #4285f4;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            font-size: 16px;
+        <a href="/firebase-auth" target="_blank" style="
+            background: Blue;
+            color: #3c4043;
+            border: 1px solid #dadce0;
+            padding: 16px 32px;
+            font-size: 17px;
+            font-weight: 500;
             border-radius: 8px;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
-            gap: 10px;
+            justify-content: center;
+            gap: 14px;
             text-decoration: none;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            transition: all 0.2s ease;
+            position: relative;
+            overflow: hidden;
+            min-width: 280px;
         ">
-            <svg width="18" height="18" viewBox="0 0 48 48">
+            <svg width="20" height="20" viewBox="0 0 48 48" style="position: relative; z-index: 1;">
                 <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
                 <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
                 <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
                 <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
             </svg>
-            Continue with Google
+            <span style="position: relative; z-index: 1;">Continue with Google</span>
         </a>
-        <p style="margin-top: 15px; font-size: 14px; color: #666;">
-            Opens in new window → Returns here automatically
-        </p>
+        <style>
+            a[href="/firebase-auth"]:hover {
+                background: #f8f9fa;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+                border-color: #d2d4d6;
+            }
+            a[href="/firebase-auth"]:active {
+                background: #f1f3f4;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+            }
+        </style>
     </div>
-    """
+"""
 
 login_html = """
     <div style="padding: 20px; text-align: center;">
-        <a href="http://localhost:5000/firebase-auth?action=login" target="_blank" style="
-            background-color: #4285f4;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            font-size: 16px;
+        <a href="/firebase-auth" target="_blank" style="
+            background: Blue;
+            color: #3c4043;
+            border: 1px solid #dadce0;
+            padding: 16px 32px;
+            font-size: 17px;
+            font-weight: 500;
             border-radius: 8px;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
-            gap: 10px;
+            justify-content: center;
+            gap: 14px;
             text-decoration: none;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            transition: all 0.2s ease;
+            position: relative;
+            overflow: hidden;
+            min-width: 280px;
         ">
-            <svg width="18" height="18" viewBox="0 0 48 48">
+            <svg width="20" height="20" viewBox="0 0 48 48" style="position: relative; z-index: 1;">
                 <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
                 <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
                 <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
                 <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
             </svg>
-            Continue with Google
+            <span style="position: relative; z-index: 1;">Continue with Google</span>
         </a>
-        <p style="margin-top: 15px; font-size: 14px; color: #666;">
-            Opens in new window → Returns here automatically
-        </p>
+        <style>
+            a[href="/firebase-auth"]:hover {
+                background: #f8f9fa;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+                border-color: #d2d4d6;
+            }
+            a[href="/firebase-auth"]:active {
+                background: #f1f3f4;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+            }
+        </style>
     </div>
-    """
+"""
 def login_user(username, password):
     """Login user - FIXED with complete session isolation & 17 outputs"""
     global current_session_id, guest_chat_count
@@ -1248,7 +1412,7 @@ def login_user(username, password):
     if not MONGODB_AVAILABLE:
         current_session_id += 1
         clear_guest_history()
-        guest_chat_count = 0,
+        guest_chat_count = 0
         current_user["username"] = username
         current_user["logged_in"] = True
         current_user["is_guest"] = False
@@ -1335,6 +1499,7 @@ def login_user(username, password):
                 gr.update(visible=True),  # image_search_tab
                 gr.update(visible=True),  # video_gen_tab
                 gr.update(visible=True),  # translation_tab
+                gr.update(visible=True),  # web_search_tab
                 gr.update(visible=True),  # maps_tab
                 gr.update(visible=True),  # stats_btn
                 [],  # history_chatbot
@@ -1415,6 +1580,7 @@ def logout_user():
         gr.update(visible=False),  # image_search_tab
         gr.update(visible=False),  # video_gen_tab
         gr.update(visible=False),  # translation_tab
+        gr.update(visible=False),  # web_search_tab
         gr.update(visible=False),  # maps_tab
         gr.update(visible=False),  # stats_btn
         [],  # history_chatbot
@@ -4629,303 +4795,636 @@ def auto_check_auth_status(counter):
 # FLASK ROUTES - SINGLE UNIFIED BLOCK
 # ================================
 
-@flask_app.route("/test", methods=["GET"])
-def test_route():
-    """Test if Flask is working"""
-    return jsonify({
-        "message": "✅ Flask is working!",
-        "base_url": BASE_URL,
-        "routes": [str(rule) for rule in flask_app.url_map.iter_rules()]
-    })
+# @flask_app.route("/test", methods=["GET"])
+# def test_route():
+#     """Test if Flask is working"""
+#     return jsonify({
+#         "message": "✅ Flask is working!",
+#         "base_url": BASE_URL,
+#         "routes": [str(rule) for rule in flask_app.url_map.iter_rules()]
+#     })
+#
+#
+# @flask_app.route("/test-firebase", methods=["GET"])
+# def test_firebase():
+#     """Test Firebase configuration"""
+#     try:
+#         app = firebase_admin.get_app()
+#         return jsonify({
+#             "status": "✅ Firebase initialized",
+#             "app_name": app.name,
+#             "project_id": app.project_id if hasattr(app, 'project_id') else "N/A"
+#         }), 200
+#     except ValueError:
+#         return jsonify({
+#             "status": "❌ Firebase NOT initialized",
+#             "error": "No Firebase app found"
+#         }), 500
+#     except Exception as e:
+#         return jsonify({
+#             "status": "❌ Error",
+#             "error": str(e)
+#         }), 500
+#
+#
+# @flask_app.route("/api/check_auth", methods=["GET"])
+# def api_check_auth():
+#     """Check authentication status - KEEP ONLY THIS ONE"""
+#     return jsonify({
+#         "logged_in": current_user.get("logged_in", False),
+#         "username": current_user.get("username"),
+#         "email": current_user.get("email"),
+#         "is_guest": current_user.get("is_guest", True),
+#         "full_name": current_user.get("full_name", "")
+#     })
+#
+#
+# @flask_app.route("/check-auth", methods=["GET"])
+# def check_auth_status():
+#     """Legacy auth check endpoint - KEEP ONLY THIS ONE"""
+#     return jsonify({
+#         "logged_in": current_user.get("logged_in", False),
+#         "username": current_user.get("username"),
+#         "email": current_user.get("email"),
+#         "is_guest": current_user.get("is_guest", True),
+#         "full_name": current_user.get("full_name", "")
+#     })
+#
+#
+# @flask_app.route("/firebase-auth", methods=["GET"])
+# def firebase_auth_page():
+#     """Serve Firebase authentication page - Docker compatible"""
+#     logging.info("🔥 Firebase auth page requested")
+#
+#     config_str = json.dumps(firebase_config)
+#
+#     # ✅ Use window.location.origin (works everywhere)
+#     api_base = ""  # Empty string = same origin
+#
+#     html_content = f"""
+# <!DOCTYPE html>
+# <html lang="en">
+# <head>
+#     <meta charset="UTF-8">
+#     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+#     <title>Firebase Authentication</title>
+#     <style>
+#         body {{
+#             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+#             display: flex;
+#             justify-content: center;
+#             align-items: center;
+#             min-height: 100vh;
+#             margin: 0;
+#             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+#         }}
+#         .auth-container {{
+#             background: white;
+#             padding: 40px;
+#             border-radius: 20px;
+#             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+#             text-align: center;
+#             max-width: 400px;
+#             width: 90%;
+#         }}
+#         h1 {{
+#             color: #333;
+#             margin-bottom: 10px;
+#             font-size: 28px;
+#         }}
+#         p {{
+#             color: #666;
+#             margin-bottom: 30px;
+#         }}
+#         #google-btn {{
+#             background-color: #4285f4;
+#             color: white;
+#             border: none;
+#             padding: 14px 28px;
+#             font-size: 16px;
+#             border-radius: 8px;
+#             cursor: pointer;
+#             display: inline-flex;
+#             align-items: center;
+#             gap: 12px;
+#             transition: all 0.3s ease;
+#             box-shadow: 0 4px 12px rgba(66, 133, 244, 0.4);
+#         }}
+#         #google-btn:hover {{
+#             background-color: #357ae8;
+#             transform: translateY(-2px);
+#             box-shadow: 0 6px 16px rgba(66, 133, 244, 0.6);
+#         }}
+#         #google-btn:disabled {{
+#             background-color: #ccc;
+#             cursor: not-allowed;
+#             transform: none;
+#         }}
+#         #status {{
+#             margin-top: 20px;
+#             padding: 12px;
+#             border-radius: 8px;
+#             font-size: 14px;
+#             display: none;
+#         }}
+#         .success {{ background-color: #d4edda; color: #155724; display: block; }}
+#         .error {{ background-color: #f8d7da; color: #721c24; display: block; }}
+#         .info {{ background-color: #d1ecf1; color: #0c5460; display: block; }}
+#     </style>
+# </head>
+# <body>
+#     <div class="auth-container">
+#         <h1>🔐 Sign In</h1>
+#         <p>Sign in with your Google account</p>
+#
+#         <button id="google-btn">
+#             <svg width="18" height="18" viewBox="0 0 48 48">
+#                 <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+#                 <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+#                 <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+#                 <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+#             </svg>
+#             Sign in with Google
+#         </button>
+#
+#         <div id="status"></div>
+#     </div>
+#
+#     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+#     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+#
+#     <script>
+#         const API_BASE = window.location.origin;
+#         const firebaseConfig = {config_str};
+#
+#         console.log('🔥 Firebase Config:', firebaseConfig);
+#         console.log('🌐 API Base:', API_BASE);
+#
+#         if (!firebaseConfig.apiKey || !firebaseConfig.authDomain) {{
+#             document.getElementById('status').textContent = '❌ Firebase not configured';
+#             document.getElementById('status').className = 'error';
+#             throw new Error('Firebase config incomplete');
+#         }}
+#
+#         firebase.initializeApp(firebaseConfig);
+#         const auth = firebase.auth();
+#         const provider = new firebase.auth.GoogleAuthProvider();
+#
+#         document.getElementById('google-btn').addEventListener('click', async () => {{
+#             const btn = document.getElementById('google-btn');
+#             const status = document.getElementById('status');
+#
+#             btn.disabled = true;
+#             status.textContent = '⏳ Opening Google Sign-In...';
+#             status.className = 'info';
+#
+#             try {{
+#                 const result = await auth.signInWithPopup(provider);
+#                 const user = result.user;
+#                 const token = await user.getIdToken();
+#
+#                 console.log('✅ Signed in:', user.email);
+#
+#                 status.textContent = '✅ Signed in! Sending to server...';
+#                 status.className = 'success';
+#
+#                 const response = await fetch(API_BASE + '/api/firebase-login', {{
+#                     method: 'POST',
+#                     headers: {{ 'Content-Type': 'application/json' }},
+#                     body: JSON.stringify({{ token }})
+#                 }});
+#
+#                 const data = await response.json();
+#
+#                 if (data.success) {{
+#                     status.textContent = '✅ Success! Redirecting...';
+#                     localStorage.setItem('firebase_login_event', JSON.stringify({{
+#                         username: data.user.username,
+#                         email: data.user.email,
+#                         timestamp: Date.now()
+#                     }}));
+#                     setTimeout(() => {{
+#                         window.close();
+#                         if (window.opener) window.opener.location.reload();
+#                     }}, 1000);
+#                 }} else {{
+#                     throw new Error(data.error || 'Unknown error');
+#                 }}
+#
+#             }} catch (error) {{
+#                 console.error('❌ Error:', error);
+#                 status.textContent = '❌ Error: ' + error.message;
+#                 status.className = 'error';
+#                 btn.disabled = false;
+#             }}
+#         }});
+#     </script>
+# </body>
+# </html>
+#     """
+#
+#     return html_content
+#
+# @flask_app.route("/firebase-login", methods=["POST", "OPTIONS"])
+# def firebase_login_endpoint():
+#     """Handle Firebase authentication"""
+#
+#     if request.method == "OPTIONS":
+#         response = jsonify({"status": "ok"})
+#         response.headers.add("Access-Control-Allow-Origin", "*")
+#         response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+#         response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
+#         return response, 200
+#
+#     logging.info("🔥 Firebase login endpoint called")
+#
+#     try:
+#         data = request.get_json(force=True)
+#         id_token = data.get("token") if data else None
+#
+#         if not id_token:
+#             response = jsonify({"success": False, "error": "No token provided"})
+#             response.headers.add("Access-Control-Allow-Origin", "*")
+#             return response, 400
+#
+#         user_info = verify_firebase_token(id_token)
+#
+#         if not user_info:
+#             response = jsonify({"success": False, "error": "Invalid token"})
+#             response.headers.add("Access-Control-Allow-Origin", "*")
+#             return response, 401
+#
+#         success, message = register_or_login_firebase_user(user_info)
+#
+#         if success:
+#             notify_gradio_login({
+#                 "username": current_user["username"],
+#                 "email": current_user["email"],
+#                 "full_name": current_user.get("full_name", "")
+#             })
+#
+#             response = jsonify({
+#                 "success": True,
+#                 "message": message,
+#                 "user": {
+#                     "username": current_user["username"],
+#                     "email": current_user["email"],
+#                     "full_name": current_user.get("full_name", "")
+#                 }
+#             })
+#             response.headers.add("Access-Control-Allow-Origin", "*")
+#             return response, 200
+#         else:
+#             response = jsonify({"success": False, "error": message})
+#             response.headers.add("Access-Control-Allow-Origin", "*")
+#             return response, 500
+#
+#     except Exception as e:
+#         logging.error(f"Firebase login error: {e}")
+#         logging.error(traceback.format_exc())
+#         response = jsonify({"success": False, "error": str(e)})
+#         response.headers.add("Access-Control-Allow-Origin", "*")
+#         return response, 500
 
 
-@flask_app.route("/test-firebase", methods=["GET"])
-def test_firebase():
-    """Test Firebase configuration"""
-    try:
-        app = firebase_admin.get_app()
-        return jsonify({
-            "status": "✅ Firebase initialized",
-            "app_name": app.name,
-            "project_id": app.project_id if hasattr(app, 'project_id') else "N/A"
-        }), 200
-    except ValueError:
-        return jsonify({
-            "status": "❌ Firebase NOT initialized",
-            "error": "No Firebase app found"
-        }), 500
-    except Exception as e:
-        return jsonify({
-            "status": "❌ Error",
-            "error": str(e)
-        }), 500
 
-
-@flask_app.route("/api/check_auth", methods=["GET"])
-def api_check_auth():
-    """Check authentication status - KEEP ONLY THIS ONE"""
-    return jsonify({
-        "logged_in": current_user.get("logged_in", False),
-        "username": current_user.get("username"),
-        "email": current_user.get("email"),
-        "is_guest": current_user.get("is_guest", True),
-        "full_name": current_user.get("full_name", "")
-    })
-
-
-@flask_app.route("/check-auth", methods=["GET"])
-def check_auth_status():
-    """Legacy auth check endpoint - KEEP ONLY THIS ONE"""
-    return jsonify({
-        "logged_in": current_user.get("logged_in", False),
-        "username": current_user.get("username"),
-        "email": current_user.get("email"),
-        "is_guest": current_user.get("is_guest", True),
-        "full_name": current_user.get("full_name", "")
-    })
-
-
-@flask_app.route("/firebase-auth", methods=["GET"])
-def firebase_auth_page():
-    """Serve Firebase authentication page with proper config injection"""
-    logging.info("🔥 Firebase auth page requested")
-
-    # ✅ Get Firebase config
-    config_str = json.dumps(firebase_config)
-
-    # ✅ CORRECTED HTML with proper config injection
-    html_content = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Firebase Authentication</title>
-    <style>
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }}
-        .auth-container {{
-            background: white;
-            padding: 40px;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            text-align: center;
-            max-width: 400px;
-            width: 90%;
-        }}
-        h1 {{
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 28px;
-        }}
-        p {{
-            color: #666;
-            margin-bottom: 30px;
-        }}
-        #google-btn {{
-            background-color: #4285f4;
-            color: white;
-            border: none;
-            padding: 14px 28px;
-            font-size: 16px;
-            border-radius: 8px;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 12px;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 12px rgba(66, 133, 244, 0.4);
-        }}
-        #google-btn:hover {{
-            background-color: #357ae8;
-            transform: translateY(-2px);
-            box-shadow: 0 6px 16px rgba(66, 133, 244, 0.6);
-        }}
-        #google-btn:disabled {{
-            background-color: #ccc;
-            cursor: not-allowed;
-            transform: none;
-        }}
-        #status {{
-            margin-top: 20px;
-            padding: 12px;
-            border-radius: 8px;
-            font-size: 14px;
-        }}
-        .success {{ background-color: #d4edda; color: #155724; }}
-        .error {{ background-color: #f8d7da; color: #721c24; }}
-        .info {{ background-color: #d1ecf1; color: #0c5460; }}
-    </style>
-</head>
-<body>
-    <div class="auth-container">
-        <h1>🔐 Sign In</h1>
-        <p>Sign in with your Google account</p>
-
-        <button id="google-btn">
-            <svg width="18" height="18" viewBox="0 0 48 48">
-                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-            </svg>
-            Sign in with Google
-        </button>
-
-        <div id="status"></div>
-    </div>
-
-    <!-- Firebase SDK -->
-    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
-
-    <script>
-        // ✅ INJECT FIREBASE CONFIG FROM PYTHON
-        const firebaseConfig = {config_str};
-
-        console.log('🔥 Firebase Config:', firebaseConfig);
-
-        // Validate config
-        if (!firebaseConfig.apiKey || !firebaseConfig.authDomain) {{
-            document.getElementById('status').innerHTML = '❌ Firebase not configured properly';
-            document.getElementById('status').className = 'error';
-            throw new Error('Firebase config missing required fields');
-        }}
-
-        // Initialize Firebase
-        firebase.initializeApp(firebaseConfig);
-        const auth = firebase.auth();
-        const provider = new firebase.auth.GoogleAuthProvider();
-
-        console.log('✅ Firebase initialized successfully');
-
-        document.getElementById('google-btn').addEventListener('click', async () => {{
-            const btn = document.getElementById('google-btn');
-            const status = document.getElementById('status');
-
-            btn.disabled = true;
-            status.textContent = '⏳ Opening Google Sign-In...';
-            status.className = 'info';
-
-            try {{
-                const result = await auth.signInWithPopup(provider);
-                const user = result.user;
-                const token = await user.getIdToken();
-
-                console.log('✅ Signed in:', user.email);
-
-                status.textContent = '✅ Signed in! Sending to server...';
-                status.className = 'success';
-
-                // Send token to Flask backend
-                const response = await fetch('http://localhost:5000/firebase-login', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ token }})
-                }});
-
-                const data = await response.json();
-
-                if (data.success) {{
-                    status.textContent = '✅ Success! Redirecting...';
-                    localStorage.setItem('firebase_login_event', JSON.stringify({{
-                        username: data.user.username,
-                        email: data.user.email,
-                        timestamp: Date.now()
-                    }}));
-                    setTimeout(() => {{
-                        window.close();
-                        window.opener.location.reload();
-                    }}, 1000);
-                }} else {{
-                    throw new Error(data.error || 'Unknown error');
-                }}
-
-            }} catch (error) {{
-                console.error('❌ Error:', error);
-                status.textContent = '❌ Error: ' + error.message;
-                status.className = 'error';
-                btn.disabled = false;
-            }}
-        }});
-    </script>
-</body>
-</html>
-    """
-
-    return html_content
-
-@flask_app.route("/firebase-login", methods=["POST", "OPTIONS"])
-def firebase_login_endpoint():
-    """Handle Firebase authentication"""
-
-    if request.method == "OPTIONS":
-        response = jsonify({"status": "ok"})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
-        return response, 200
-
-    logging.info("🔥 Firebase login endpoint called")
-
-    try:
-        data = request.get_json(force=True)
-        id_token = data.get("token") if data else None
-
-        if not id_token:
-            response = jsonify({"success": False, "error": "No token provided"})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 400
-
-        user_info = verify_firebase_token(id_token)
-
-        if not user_info:
-            response = jsonify({"success": False, "error": "Invalid token"})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 401
-
-        success, message = register_or_login_firebase_user(user_info)
-
-        if success:
-            notify_gradio_login({
-                "username": current_user["username"],
-                "email": current_user["email"],
-                "full_name": current_user.get("full_name", "")
-            })
-
-            response = jsonify({
-                "success": True,
-                "message": message,
-                "user": {
-                    "username": current_user["username"],
-                    "email": current_user["email"],
-                    "full_name": current_user.get("full_name", "")
-                }
-            })
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 200
-        else:
-            response = jsonify({"success": False, "error": message})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 500
-
-    except Exception as e:
-        logging.error(f"Firebase login error: {e}")
-        logging.error(traceback.format_exc())
-        response = jsonify({"success": False, "error": str(e)})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        return response, 500
+# ============================================================================
+# DEFINE MODE TOGGLE FUNCTION (before Gradio UI)
+# ============================================================================
+def toggle_mode(mode):
+    """Toggle between Everyday and Professional modes"""
+    if mode == "everyday":
+        return (
+            gr.update(visible=True),   # chat_tab
+            gr.update(visible=False),  # file_qa_tab
+            gr.update(visible=False),  # image_gen_tab
+            gr.update(visible=False),  # image_qa_tab
+            gr.update(visible=False),  # image_search_tab
+            gr.update(visible=False),  # video_gen_tab
+            gr.update(visible=False),  # translation_tab
+            gr.update(visible=False),  # web_search_tab
+            gr.update(visible=False),  # maps_tab
+            gr.update(visible=False),  # code_tab
+        )
+    else:  # professional mode
+        return (
+            gr.update(visible=True),   # chat_tab
+            gr.update(visible=True),   # file_qa_tab
+            gr.update(visible=True),   # image_gen_tab
+            gr.update(visible=True),   # image_qa_tab
+            gr.update(visible=True),   # image_search_tab
+            gr.update(visible=True),   # video_gen_tab
+            gr.update(visible=True),   # translation_tab
+            gr.update(visible=True),   # web_search_tab
+            gr.update(visible=True),   # maps_tab
+            gr.update(visible=True),   # code_tab
+        )
 
 # ------------------ GRADIO UI ------------------
-with gr.Blocks(title="All Mind") as demo:
-    gr.Markdown("# 🤖 All Mind")
+with gr.Blocks(
+        title="All Mind",
+        css="""
+/* ============================================
+   TEXT VISIBILITY FIXES
+   ============================================ */
+
+/* Fix white text on white background */
+.gradio-container label,
+.gradio-container p,
+.gradio-container span,
+.gradio-container div,
+.gradio-container .markdown {
+    color: #374151 !important;
+}
+
+/* Dark mode support */
+.dark .gradio-container label,
+.dark .gradio-container p,
+.dark .gradio-container span,
+.dark .gradio-container div,
+.dark .gradio-container .markdown {
+    color: #e5e7eb !important;
+}
+
+/* Input fields visibility */
+.gradio-container input,
+.gradio-container textarea {
+    color: #1f2937 !important;
+    background-color: white !important;
+}
+
+.dark .gradio-container input,
+.dark .gradio-container textarea {
+    color: #f3f4f6 !important;
+    background-color: #1f2937 !important;
+}
+
+/* Button text visibility */
+.gradio-container button {
+    color: inherit !important;
+}
+
+/* Chatbot message visibility */
+.message.user,
+.message.bot {
+    color: #1f2937 !important;
+}
+
+.dark .message.user,
+.dark .message.bot {
+    color: #f3f4f6 !important;
+}
+
+/* ============================================
+   MODE SELECTOR & PURPOSE BANNERS
+   ============================================ */
+
+/* Mode Selector Styling */
+.mode-selector {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 20px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+.mode-btn {
+    padding: 12px 30px;
+    margin: 0 10px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.mode-btn-active {
+    background: white;
+    color: #667eea;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+}
+
+.mode-btn-inactive {
+    background: rgba(255,255,255,0.2);
+    color: white;
+}
+
+/* Purpose Banner Styling */
+.purpose-banner {
+    background: linear-gradient(to right, #f6f8fb, #ffffff);
+    border-left: 4px solid #667eea;
+    padding: 15px 20px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+}
+
+.purpose-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #2d3748 !important;
+    margin-bottom: 8px;
+}
+
+.purpose-desc {
+    font-size: 14px;
+    color: #4a5568 !important;
+    line-height: 1.6;
+}
+
+.purpose-meta {
+    display: flex;
+    gap: 15px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: #718096 !important;
+}
+
+.purpose-meta span {
+    color: #718096 !important;
+}
+
+/* Welcome Screen */
+.welcome-screen {
+    text-align: center;
+    padding: 40px 20px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-radius: 12px;
+    margin-bottom: 30px;
+}
+
+.welcome-title {
+    font-size: 32px;
+    font-weight: 800;
+    margin-bottom: 15px;
+}
+
+.welcome-subtitle {
+    font-size: 18px;
+    opacity: 0.9;
+}
+
+/* ============================================
+   RESPONSIVE DESIGN WITH PROPER SPACING
+   ============================================ */
+
+/* Container adjusts to screen size */
+.gradio-container {
+    max-width: 100% !important;
+    width: 100% !important;
+    padding: 1.5rem !important;
+}
+
+/* Add spacing between sections */
+.gr-group, .gr-box, .gr-form {
+    margin-bottom: 1.5rem !important;
+    padding: 1.5rem !important;
+}
+
+/* Add spacing between rows */
+.gr-row {
+    margin-bottom: 1rem !important;
+    gap: 1rem !important;
+}
+
+/* Better button spacing */
+button {
+    margin: 0.25rem !important;
+}
+
+/* Chatbot with breathing room */
+.chatbot {
+    margin: 1rem 0 !important;
+    padding: 1rem !important;
+}
+
+/* Input fields spacing */
+input, textarea {
+    margin-bottom: 0.5rem !important;
+}
+
+/* Tab spacing */
+.tabs {
+    margin-bottom: 1.5rem !important;
+}
+
+.tab-nav {
+    padding: 0.5rem 0 !important;
+    margin-bottom: 1rem !important;
+}
+
+/* Header spacing */
+h1, h2, h3 {
+    margin-top: 1rem !important;
+    margin-bottom: 1rem !important;
+}
+
+/* Audio recorder spacing */
+.gr-audio {
+    margin-bottom: 1rem !important;
+}
+
+/* Status messages spacing */
+.gr-markdown {
+    margin: 0.75rem 0 !important;
+}
+
+/* Hide timer status boxes */
+div[data-testid="textbox"]:has(input[value*="available now"]) {
+    display: none !important;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+    .gradio-container {
+        padding: 1rem !important;
+    }
+
+    .gr-group, .gr-box {
+        padding: 1rem !important;
+        margin-bottom: 1rem !important;
+    }
+
+    /* Stack buttons vertically on mobile */
+    .gr-row {
+        flex-direction: column !important;
+        gap: 0.75rem !important;
+    }
+
+    /* Make tabs scrollable on mobile */
+    .tab-nav {
+        overflow-x: auto !important;
+        flex-wrap: nowrap !important;
+    }
+
+    /* Larger touch targets for mobile */
+    button {
+        min-height: 44px !important;
+        padding: 12px 16px !important;
+        width: 100% !important;
+    }
+
+    /* Chatbot full width on mobile */
+    .chatbot {
+        width: 100% !important;
+    }
+}
+
+/* Tablet responsiveness */
+@media (min-width: 769px) and (max-width: 1024px) {
+    .gradio-container {
+        padding: 2rem !important;
+        max-width: 100% !important;
+    }
+}
+
+/* Desktop responsiveness */
+@media (min-width: 1025px) {
+    .gradio-container {
+        max-width: 1400px !important;
+        margin: 0 auto !important;
+        padding: 2rem !important;
+    }
+}
+
+/* Force responsive images and videos */
+img, video {
+    max-width: 100% !important;
+    height: auto !important;
+}
+
+/* Better spacing for the conversation area */
+.conversation-container {
+    padding: 1rem !important;
+}
+
+/* Add gap between Record button and conversation */
+.gr-button + * {
+    margin-top: 1rem !important;
+}
+    """
+) as demo:
+    # Welcome Screen
+    gr.HTML("""
+    <div class="welcome-screen">
+        <h1 class="welcome-title">🌟 Welcome to All Mind</h1>
+        <p class="welcome-subtitle">Your All-in-One AI Assistant</p>
+    </div>
+    """)
+
+    # Mode Selector
+    with gr.Row(elem_classes="mode-selector"):
+        gr.Markdown("### Choose Your Experience")
+        with gr.Row():
+            everyday_btn = gr.Button("🌞 Everyday Mode", elem_classes="mode-btn mode-btn-active")
+            professional_btn = gr.Button("💼 Professional Mode", elem_classes="mode-btn mode-btn-inactive")
+
+    gr.Markdown("""
+    **Everyday Mode**: Simple, essential tools for daily tasks  
+    **Professional Mode**: Full suite of advanced AI capabilities
+    """)
+
+    mode_state = gr.State("everyday")
 
     # Login/Register Section
     with gr.Group(visible=False) as auth_section:
@@ -5009,19 +5508,6 @@ with gr.Blocks(title="All Mind") as demo:
             "### 🎤 **Voice Input Available on All Tabs!** Click the microphone icon to speak instead of typing.")
 
         with gr.Row():
-            chat_timer = gr.Textbox(label="Chat Timer", interactive=False, value=get_timer_text("text_qa", "Chat"))
-            file_qa_timer = gr.Textbox(label="File Q&A Timer", interactive=False,
-                                       value=get_timer_text("file_qa", "File Q&A"))
-            image_timer = gr.Textbox(label="Image Timer", interactive=False,
-                                     value=get_timer_text("image_gen", "Image Gen"))
-            video_timer = gr.Textbox(label="Video Timer", interactive=False,
-                                     value=get_timer_text("video_gen", "Video Gen"))
-            image_search_timer = gr.Textbox(label="Image Search Timer", interactive=False,
-                                            value=get_timer_text("image_search", "Image Search"))
-            ip_timer = gr.Textbox(label="Public IP Timer", interactive=False,
-                                  value=get_timer_text("public_ip", "Public IP"))
-
-        with gr.Row():
             show_history_btn = gr.Button("📋 Show My History", variant="primary", size="lg")
 
         session_id = gr.State(0)
@@ -5048,7 +5534,22 @@ with gr.Blocks(title="All Mind") as demo:
         clear_all_btn.click(clear_all_history_action, outputs=[history_chatbot, history_status])
         close_modal_btn.click(close_history_modal, outputs=history_modal)
 
-        with gr.Tab("💬 Chat with Voice Input"):
+        with gr.Tab("💬 Chat with Voice Input") as chat_tab:
+            gr.HTML("""
+            <div class="purpose-banner">
+                <div class="purpose-title">💬 AI Chat Assistant</div>
+                <div class="purpose-desc">
+                    Have natural conversations with AI. Ask questions, get advice, brainstorm ideas, 
+                    or chat about anything on your mind.
+                </div>
+                <div class="purpose-meta">
+                    <span>👤 For: Everyone</span>
+                    <span>⏱️ Best for: Quick answers, learning, creative thinking</span>
+                    <span>📊 Difficulty: Beginner</span>
+                </div>
+            </div>
+            """)
+
             gr.Markdown("### 🎤 Use voice or text to chat with AI")
 
             guest_chat_warning = gr.Markdown("", visible=True)
@@ -5060,20 +5561,6 @@ with gr.Blocks(title="All Mind") as demo:
 
             user_input = gr.Textbox(placeholder="Enter your message here... or use voice input above",
                                     label="Type your message")
-
-            target_language_dropdown = gr.Dropdown(
-                label="Select target language",
-                choices=["fr", "es", "hi", "zh", "de"],
-                visible=False
-            )
-
-            translation_output_textbox = gr.Textbox(label="Translated Text", interactive=False)
-            translation_audio_output = gr.Audio(label="Spoken Output")
-
-            with gr.Row():
-                target_language_dropdown
-                translation_output_textbox
-                translation_audio_output
 
             with gr.Row():
                 send_btn = gr.Button("Send", variant="primary")
@@ -5112,6 +5599,21 @@ with gr.Blocks(title="All Mind") as demo:
             )
 
         with gr.Tab("📄 File Q&A", visible=False) as file_qa_tab:
+            gr.HTML("""
+            <div class="purpose-banner">
+                <div class="purpose-title">📄 Document Analysis</div>
+                <div class="purpose-desc">
+                    Upload documents and ask questions about them. AI will read and answer 
+                    questions about PDFs, Word docs, and text files.
+                </div>
+                <div class="purpose-meta">
+                    <span>👤 For: Students, researchers, professionals</span>
+                    <span>⏱️ Best for: Research, studying, document review</span>
+                    <span>📊 Difficulty: Intermediate</span>
+                </div>
+            </div>
+            """)
+
             gr.Markdown("### 🎤 Upload a file and ask ANYTHING - extract, analyze, generate, transform!")
             gr.Markdown(
                 "**Examples:** Extract data, summarize, generate questions, reformat, translate, create study notes, find errors, etc.")
@@ -5144,6 +5646,21 @@ with gr.Blocks(title="All Mind") as demo:
             )
 
         with gr.Tab("🎨 Image Generation", visible=False) as image_gen_tab:
+            gr.HTML("""
+            <div class="purpose-banner">
+                <div class="purpose-title">🎨 Create AI Images</div>
+                <div class="purpose-desc">
+                    Generate stunning images from text descriptions. Perfect for social media, 
+                    presentations, or creative projects.
+                </div>
+                <div class="purpose-meta">
+                    <span>👤 For: Content creators, marketers, hobbyists</span>
+                    <span>⏱️ Best for: Visual content, mockups, artwork</span>
+                    <span>📊 Difficulty: Beginner</span>
+                </div>
+            </div>
+            """)
+
             gr.Markdown("### 🎨 Generate stunning images from text prompts")
 
             with gr.Row():
@@ -5168,6 +5685,20 @@ with gr.Blocks(title="All Mind") as demo:
             )
 
         with gr.Tab("🔍 Image Q&A", visible=False) as image_qa_tab:
+            gr.HTML("""
+            <div class="purpose-banner">
+                <div class="purpose-title">🔍 Analyze Images with AI</div>
+                <div class="purpose-desc">
+                    Upload any image and ask questions about it. Perfect for identifying objects, 
+                    reading text, analyzing diagrams, or understanding visual content.
+                </div>
+                <div class="purpose-meta">
+                    <span>👤 For: Students, researchers, content creators</span>
+                    <span>⏱️ Best for: Image analysis, OCR, visual understanding</span>
+                    <span>📊 Difficulty: Beginner</span>
+                </div>
+            </div>
+            """)
             gr.Markdown("### 🖼️ Ask questions about an uploaded image")
 
             with gr.Row():
@@ -5213,6 +5744,20 @@ with gr.Blocks(title="All Mind") as demo:
             )
 
         with gr.Tab("🖼️ Image Search", visible=False) as image_search_tab:
+            gr.HTML("""
+            <div class="purpose-banner">
+                <div class="purpose-title">🖼️ Google Image Search</div>
+                <div class="purpose-desc">
+                    Find high-quality images from across the web using Google's search engine. 
+                    Great for presentations, research, and creative projects.
+                </div>
+                <div class="purpose-meta">
+                    <span>👤 For: Content creators, students, marketers</span>
+                    <span>⏱️ Best for: Finding reference images, stock photos</span>
+                    <span>📊 Difficulty: Beginner</span>
+                </div>
+            </div>
+            """)
             gr.Markdown("### 🌐 Search and retrieve a relevant image from Google")
             gr.Markdown("**💡 NEW: Paste images with Ctrl+V!** Use the paste area below to paste images from clipboard.")
 
@@ -5240,6 +5785,20 @@ with gr.Blocks(title="All Mind") as demo:
             )
 
         with gr.Tab("🎥 Video Generation", visible=False) as video_gen_tab:
+            gr.HTML("""
+            <div class="purpose-banner">
+                <div class="purpose-title">🎥 AI Video Creation</div>
+                <div class="purpose-desc">
+                    Transform text descriptions into animated videos. Create engaging content 
+                    for social media, presentations, or creative projects in seconds.
+                </div>
+                <div class="purpose-meta">
+                    <span>👤 For: Content creators, marketers, educators</span>
+                    <span>⏱️ Best for: Social media content, ads, demos</span>
+                    <span>📊 Difficulty: Intermediate</span>
+                </div>
+            </div>
+            """)
             gr.Markdown("### 🎬 Generate AI Videos from Text Prompts")
             gr.Markdown(
                 "**Smart Fallback System:** Tries Replicate (premium) first, then falls back to FREE services (Hugging Face + Pollinations)!")
@@ -5270,6 +5829,20 @@ with gr.Blocks(title="All Mind") as demo:
 
         # ✅ CRITICAL FIX: Maps tab moved OUTSIDE video_gen_tab (reduced indentation)
         with gr.Tab("🗺️ Maps & Location", visible=False) as maps_tab:
+            gr.HTML("""
+            <div class="purpose-banner">
+                <div class="purpose-title">🗺️ Location & Navigation</div>
+                <div class="purpose-desc">
+                    Search any location worldwide, get turn-by-turn directions, and find nearby 
+                    places. Real-time maps with satellite imagery and traffic information.
+                </div>
+                <div class="purpose-meta">
+                    <span>👤 For: Travelers, local explorers, everyone</span>
+                    <span>⏱️ Best for: Navigation, trip planning, finding places</span>
+                    <span>📊 Difficulty: Beginner</span>
+                </div>
+            </div>
+            """)
             gr.Markdown("### 🌍 Google Maps - Search Locations, Get Directions & More")
             gr.Markdown(
                 "**Features:**\n"
@@ -5370,11 +5943,12 @@ with gr.Blocks(title="All Mind") as demo:
             )
 
             map_btn.click(
-                generate_ultra_robust_map,  # ← CHANGED THIS
+                generate_ultra_robust_map,
                 inputs=[map_mode, location_input, origin_input, destination_input, nearby_location, nearby_type],
                 outputs=[map_output, map_info]
             )
 
+            # Public IP as sub-tab inside Maps (12 spaces)
             with gr.Tab("Public IP"):
                 gr.Markdown("### Check your current public IP address")
                 ip_output = gr.Markdown(label="IP Address")
@@ -5386,6 +5960,391 @@ with gr.Blocks(title="All Mind") as demo:
                     outputs=ip_output
                 )
 
+            # ✅ CODE PLAYGROUND - SEPARATE TOP-LEVEL TAB (8 spaces - CLOSES MAPS TAB FIRST)
+        with gr.Tab("💻 Code Playground", visible=True) as code_tab:
+            gr.Markdown("### 🚀 Universal Code Executor - Run Python, Java, C, C++, JavaScript, HTML")
+            gr.Markdown(
+                "**✨ Full Multi-Language Support!** Write and execute code in multiple languages with live results.")
+
+            # Guest check message
+            code_guest_check = gr.Markdown("", visible=False)
+
+            # Language selector
+            language_selector = gr.Radio(
+                choices=["Python", "Java", "C", "C++", "JavaScript", "HTML/CSS/JS"],
+                value="Python",
+                label="Select Programming Language",
+                interactive=True
+            )
+
+            # Check available compilers
+            try:
+                from code_executor import CodeExecutor
+
+                available_langs = CodeExecutor.check_dependencies()
+                status_msg = "**Compiler/Interpreter Status:**\n\n"
+                for lang, available in available_langs.items():
+                    icon = "✅" if available else "❌"
+                    install_cmd = ""
+                    if not available:
+                        if lang == 'java':
+                            install_cmd = " (Install: Java JDK)"
+                        elif lang == 'c':
+                            install_cmd = " (Install: GCC)"
+                        elif lang == 'cpp':
+                            install_cmd = " (Install: G++)"
+                        elif lang == 'javascript':
+                            install_cmd = " (Install: Node.js)"
+                    status_msg += f"{icon} **{lang.upper()}**: {'Ready' if available else 'Not Installed' + install_cmd}\n"
+                gr.Markdown(status_msg)
+            except:
+                pass
+
+            # Two-column layout: Code editor + Input data
+            with gr.Row():
+                with gr.Column(scale=2):
+                    code_input = gr.Code(
+                                    label="Code Editor",
+                                    language="python",
+                                    value=dedent("""\
+                                                                                                    # Python Example
+                                                                                                    print("Hello from Python!")
+                                                                                                    for i in range(1, 6):
+                                                                                                        print(f"Number: {i}")
+                                                                                                """).strip(),
+                                    lines=15
+                                )
+
+                    with gr.Column(scale=1):
+                        code_input_data = gr.Textbox(
+                                    label="📥 Input Data (one value per line)",
+                                    placeholder="Example:\n10\n20\nJohn",
+                                    lines=15,
+                                    info="Enter input values here (for Scanner, input(), cin, etc.)"
+                                )
+
+                    with gr.Row():
+                        run_code_btn = gr.Button("▶️ Run Code", variant="primary", size="lg")
+                        clear_code_btn = gr.Button("🗑️ Clear", variant="secondary")
+
+                    code_output = gr.Textbox(label="Output", lines=10, interactive=False)
+                    code_error = gr.Textbox(label="Errors", lines=5, interactive=False, visible=False)
+
+                    # HTML preview (only for HTML/CSS/JS)
+                    html_preview = gr.HTML(label="Live Preview", visible=False)
+
+                    # Language examples
+                    gr.Examples(
+                        examples=[
+                            ["Python", dedent("""\
+                                                    # Python with input()
+                                                    name = input()
+                                                    age = int(input())
+                                                    print(f"Hello {name}, you are {age} years old!")
+                                                """).strip(), "Alice\n25"],
+
+                            ["Java", """import java.util.Scanner;
+
+                    public class Main {
+                        public static void main(String[] args) {
+                            Scanner s = new Scanner(System.in);
+                            int a = s.nextInt();
+                            int b = s.nextInt();
+                            System.out.println("Sum: " + (a + b));
+                            s.close();
+                        }
+                    }""", "10\n20"],
+
+                            ["C", """#include <stdio.h>
+
+                    int main() {
+                        char name[50];
+                        int age;
+                        scanf("%s %d", name, &age);
+                        printf("Hello %s, age %d\\n", name, age);
+                        return 0;
+                    }""", "Bob\n30"],
+
+                            ["C++", """#include <iostream>
+                    using namespace std;
+
+                    int main() {
+                        string name;
+                        int age;
+                        cin >> name >> age;
+                        cout << "Hello " << name << ", age " << age << endl;
+                        return 0;
+                    }""", "Charlie\n35"],
+
+                            ["JavaScript", """// JavaScript Example
+                    console.log("Hello from JavaScript!");
+                    const numbers = [1, 2, 3, 4, 5];
+                    numbers.forEach(num => {
+                        console.log(`Number ${num}, Square: ${num * num}`);
+                    });""", ""],
+
+                            ["HTML/CSS/JS", """<!DOCTYPE html>
+                    <html>
+                    <head>
+                        <style>
+                            body { font-family: Arial; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                                   display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                            .card { background: white; padding: 40px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; }
+                            button { background: #667eea; color: white; border: none; padding: 15px 30px; font-size: 18px; 
+                                     border-radius: 10px; cursor: pointer; margin-top: 20px; }
+                            button:hover { background: #5568d3; }
+                            h1 { color: #333; margin: 0 0 20px 0; }
+                            #counter { font-size: 48px; color: #667eea; font-weight: bold; }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="card">
+                            <h1>🎉 Interactive Counter</h1>
+                            <div id="counter">0</div>
+                            <button onclick="increment()">Click Me!</button>
+                        </div>
+                        <script>
+                            let count = 0;
+                            function increment() {
+                                count++;
+                                document.getElementById('counter').textContent = count;
+                            }
+                        </script>
+                    </body>
+                    </html>""", ""]
+                        ],
+                        inputs=[language_selector, code_input, code_input_data],
+                        label="📝 Try These Examples (with Input Support)"
+                    )
+
+
+                    def update_code_language(language):
+                        """Update code editor syntax highlighting and example code"""
+                        # Map to supported Gradio languages
+                        lang_map = {
+                            "Python": "python",
+                            "Java": "python",
+                            "C": "python",
+                            "C++": "python",
+                            "JavaScript": "javascript",
+                            "HTML/CSS/JS": "html"
+                        }
+
+                        # Example code for each language
+                        examples = {
+                            "Python": dedent("""\
+                                                        # Python Example
+                                                        print("Hello from Python!")
+                                                        for i in range(1, 6):
+                                                            print(f"Number: {i}")
+                                                    """).strip(),
+                            "Java": """public class Main {
+                        public static void main(String[] args) {
+                            System.out.println("Hello from Java!");
+                            for (int i = 1; i <= 5; i++) {
+                                System.out.println("Number: " + i);
+                            }
+                        }
+                    }""",
+
+                            "C": """#include <stdio.h>
+
+                    int main() {
+                        printf("Hello from C!\\n");
+                        for (int i = 1; i <= 5; i++) {
+                            printf("Number: %d\\n", i);
+                        }
+                        return 0;
+                    }""",
+
+                            "C++": """#include <iostream>
+                    using namespace std;
+
+                    int main() {
+                        cout << "Hello from C++!" << endl;
+                        for (int i = 1; i <= 5; i++) {
+                            cout << "Number: " << i << endl;
+                        }
+                        return 0;
+                    }""",
+
+                            "JavaScript": """// JavaScript Example
+                    console.log("Hello from JavaScript!");
+                    for (let i = 1; i <= 5; i++) {
+                        console.log("Number: " + i);
+                    }""",
+
+                            "HTML/CSS/JS": """<!DOCTYPE html>
+                    <html>
+                    <head>
+                        <style>
+                            body { font-family: Arial; text-align: center; padding: 50px; }
+                            button { padding: 15px 30px; font-size: 18px; cursor: pointer; }
+                            #counter { font-size: 48px; margin: 20px; }
+                        </style>
+                    </head>
+                    <body>
+                        <h1>Counter App</h1>
+                        <div id="counter">0</div>
+                        <button onclick="increment()">Click Me!</button>
+                        <script>
+                            let count = 0;
+                            function increment() {
+                                count++;
+                                document.getElementById('counter').textContent = count;
+                            }
+                        </script>
+                    </body>
+                    </html>"""
+                        }
+                        return gr.update(language=lang_map.get(language, "python"),
+                                         value=examples.get(language, examples["Python"]))
+
+
+                    def run_code(code, language, input_data=""):
+                        """Execute code in selected language with proper error handling and debugging"""
+
+                        # ============================================
+                        # STEP 1: DEBUG LOGGING
+                        # ============================================
+                        print("\n" + "=" * 60)
+                        print("🔍 CODE EXECUTION DEBUG")
+                        print("=" * 60)
+                        print(f"Language: {language}")
+                        print(f"Code length: {len(code) if code else 0} characters")
+                        print(f"Input data: {repr(input_data)}")
+                        print(f"Input data length: {len(input_data) if input_data else 0} characters")
+                        print("=" * 60 + "\n")
+
+                        # ============================================
+                        # STEP 2: VALIDATION
+                        # ============================================
+                        if current_user.get("is_guest"):
+                            return "🔒 Register to run code", gr.update(visible=False), gr.update(visible=False)
+
+                        if not CODE_EXECUTOR_AVAILABLE:
+                            return "❌ Code executor not available. Please check imports.", gr.update(
+                                visible=False), gr.update(visible=False)
+
+                        if not code or not code.strip():
+                            return "", gr.update(value="⚠️ Please enter some code to execute", visible=True), gr.update(
+                                visible=False)
+
+                        # ============================================
+                        # STEP 3: IMPORT AND SETUP
+                        # ============================================
+                        try:
+                            from code_executor import CodeExecutor
+                            logging.info("✅ CodeExecutor imported successfully")
+                        except ImportError as e:
+                            error_msg = f"❌ Fatal Error: Cannot import CodeExecutor\n\n{str(e)}\n\nMake sure code_executor.py is in the same directory."
+                            logging.error(error_msg)
+                            return "", gr.update(value=error_msg, visible=True), gr.update(visible=False)
+
+                        # ============================================
+                        # STEP 4: LANGUAGE MAPPING
+                        # ============================================
+                        lang_map = {
+                            "Python": "python",
+                            "Java": "java",
+                            "C": "c",
+                            "C++": "cpp",
+                            "JavaScript": "javascript",
+                            "HTML/CSS/JS": "html"
+                        }
+
+                        lang = lang_map.get(language, "python")
+                        logging.info(f"Mapped language: {language} -> {lang}")
+
+                        # ============================================
+                        # STEP 5: SPECIAL HTML HANDLING
+                        # ============================================
+                        if lang == "html":
+                            logging.info("Executing HTML code")
+                            try:
+                                output, error, success = CodeExecutor.execute(code, lang, stdin=input_data)
+
+                                if success:
+                                    logging.info("✅ HTML executed successfully")
+                                    return "✅ HTML rendered below", gr.update(visible=False), gr.update(value=output,
+                                                                                                        visible=True)
+                                else:
+                                    logging.error(f"❌ HTML execution failed: {error}")
+                                    return "", gr.update(value=error, visible=True), gr.update(visible=False)
+                            except Exception as e:
+                                error_msg = f"❌ HTML Execution Error:\n\n{str(e)}"
+                                logging.error(error_msg)
+                                return "", gr.update(value=error_msg, visible=True), gr.update(visible=False)
+
+                        # ============================================
+                        # STEP 6: EXECUTE CODE (NON-HTML)
+                        # ============================================
+                        logging.info(f"Executing {lang} code with input data...")
+                        logging.info(f"  - Code: {code[:100]}..." if len(code) > 100 else f"  - Code: {code}")
+                        logging.info(f"  - Language: {lang}")
+                        logging.info(f"  - Stdin: {repr(input_data)}")
+
+                        try:
+                            # ⚠️ THE CRITICAL CALL - passes stdin correctly
+                            output, error, success = CodeExecutor.execute(
+                                code=code,
+                                language=lang,
+                                stdin=input_data  # ✅ This is the key parameter!
+                            )
+
+                            logging.info(f"CodeExecutor returned:")
+                            logging.info(f"  - Success: {success}")
+                            logging.info(f"  - Output length: {len(output) if output else 0}")
+                            logging.info(f"  - Error length: {len(error) if error else 0}")
+
+                            # ============================================
+                            # STEP 7: RETURN RESULTS
+                            # ============================================
+                            if success:
+                                logging.info("✅ Code executed successfully")
+                                final_output = output if output and output.strip() else "✅ Code executed successfully (no output)"
+                                logging.info(
+                                    f"Output preview: {output[:200]}..." if len(output) > 200 else f"Output: {output}")
+                                return final_output, gr.update(visible=False), gr.update(visible=False)
+                            else:
+                                logging.error("❌ Code execution failed")
+                                logging.error(f"Error: {error}")
+                                # Show partial output even if there's an error
+                                return output or "", gr.update(value=error, visible=True), gr.update(visible=False)
+
+                        except ImportError as e:
+                            logging.error(f"Import error: {e}")
+                            return "", gr.update(
+                                value="❌ Code executor module not found. Please ensure code_executor.py exists.",
+                                visible=True
+                            ), gr.update(visible=False)
+                        except Exception as e:
+                            logging.error(f"Unexpected error in run_code: {e}")
+                            import traceback
+                            logging.error(traceback.format_exc())
+                            return "", gr.update(
+                                value=f"❌ System Error:\n\n{str(e)}\n\nPlease try again or contact support.",
+                                visible=True
+                            ), gr.update(visible=False)
+
+
+                    language_selector.change(
+                        update_code_language,
+                        inputs=language_selector,
+                        outputs=[code_input]
+                    )
+
+                    run_code_btn.click(
+                        run_code,
+                        inputs=[code_input, language_selector, code_input_data],  # ✅ Added code_input_data
+                        outputs=[code_output, code_error, html_preview]
+                    )
+
+                    clear_code_btn.click(
+                        lambda: ("", "", "", gr.update(visible=False), gr.update(visible=False)),  # ✅ Added one more ""
+                        outputs=[code_input, code_input_data, code_output, code_error, html_preview]
+                        # ✅ Added code_input_data
+                    )
         with gr.Tab("🌐 Translation", visible=False) as translation_tab:
             gr.Markdown("## 🌍 Universal Translator - Any Language to Any Language")
             gr.Markdown(
@@ -5462,12 +6421,80 @@ with gr.Blocks(title="All Mind") as demo:
                 outputs=[translate_input, translation_audio, translation_result]
             )
 
-    # Authentication Event Handlers
-    login_btn.click(
+            # ✅ WEB SEARCH - SEPARATE TOP-LEVEL TAB (8 spaces)
+        with gr.Tab("🌐 Web Search", visible=False) as web_search_tab:
+                gr.Markdown("### 🌐 Real-time Web Search")
+                gr.Markdown("Search the web and get current information from multiple sources")
+
+                with gr.Row():
+                    mic_web_search = gr.Audio(sources=["microphone"], type="filepath", label="🎙️ Speak Your Query")
+
+                web_search_input = gr.Textbox(
+                    label="🔍 Search Query",
+                    placeholder="e.g., 'latest AI developments', 'current stock price of Tesla'",
+                    lines=2
+                )
+                web_search_btn = gr.Button("🔍 Search Web", variant="primary", size="lg")
+                web_search_output = gr.Markdown(label="Search Results")
+
+                gr.Examples(
+                    examples=[
+                        ["latest AI news"],
+                        ["current weather in New York"],
+                        ["Python tutorial for beginners"],
+                        ["best restaurants near me"],
+                    ],
+                    inputs=web_search_input,
+                    label="💡 Try These Examples"
+                )
+
+                web_search_btn.click(perform_web_search, inputs=web_search_input, outputs=web_search_output)
+
+
+                def transcribe_and_search(audio_filepath):
+                    if current_user["is_guest"]:
+                        return "🔒 **Register** to use voice search."
+                    if not audio_filepath:
+                        return "No audio recorded."
+                    text = transcribe_audio(audio_filepath)
+                    if text.startswith("❌"):
+                        return text
+                    return perform_web_search(text)
+
+
+                mic_web_search.change(transcribe_and_search, inputs=mic_web_search, outputs=web_search_output)
+
+                # ============================================================================
+                # MODE TOGGLE HANDLERS - MUST BE INSIDE gr.Blocks() CONTEXT
+                # ============================================================================
+                everyday_btn.click(
+                    fn=lambda: ("everyday", gr.update(elem_classes="mode-btn mode-btn-active"),
+                                gr.update(elem_classes="mode-btn mode-btn-inactive")),
+                    outputs=[mode_state, everyday_btn, professional_btn]
+                ).then(
+                    fn=toggle_mode,
+                    inputs=[mode_state],
+                    outputs=[chat_tab, file_qa_tab, image_gen_tab, image_qa_tab,
+                             image_search_tab, video_gen_tab, translation_tab, web_search_tab, maps_tab, code_tab]
+                )
+
+                professional_btn.click(
+                    fn=lambda: ("professional", gr.update(elem_classes="mode-btn mode-btn-inactive"),
+                                gr.update(elem_classes="mode-btn mode-btn-active")),
+                    outputs=[mode_state, everyday_btn, professional_btn]
+                ).then(
+                    fn=toggle_mode,
+                    inputs=[mode_state],
+                    outputs=[chat_tab, file_qa_tab, image_gen_tab, image_qa_tab,
+                             image_search_tab, video_gen_tab, translation_tab, web_search_tab, maps_tab, code_tab]
+                )
+
+                # Authentication Event Handlers
+                login_btn.click(
         login_user,
         inputs=[login_username, login_password],
         outputs=[login_status, auth_section, main_app, user_info, file_qa_tab, image_gen_tab, image_qa_tab,
-                 image_search_tab, video_gen_tab, translation_tab, maps_tab, stats_btn, history_chatbot,
+                 image_search_tab, video_gen_tab, translation_tab, web_search_tab, maps_tab, stats_btn, history_chatbot,
                  guest_chat_warning,
                  chatbot, session_id, mic_chat]
     )
@@ -5488,7 +6515,7 @@ with gr.Blocks(title="All Mind") as demo:
         logout_user,
         inputs=None,
         outputs=[login_status, auth_section, main_app, user_info, file_qa_tab, image_gen_tab, image_qa_tab,
-                 image_search_tab, video_gen_tab, translation_tab, maps_tab, stats_btn, history_chatbot,
+                 image_search_tab, video_gen_tab, translation_tab, web_search_tab, maps_tab, stats_btn, history_chatbot,
                  guest_chat_warning,
                  chatbot, session_id, mic_chat]
     )
@@ -5513,7 +6540,7 @@ with gr.Blocks(title="All Mind") as demo:
             guest_status, auth_section, main_app, user_info,
             file_qa_tab, image_gen_tab, image_qa_tab,
             image_search_tab, video_gen_tab, translation_tab,
-            maps_tab, stats_btn, history_chatbot, guest_chat_warning,
+            web_search_tab, maps_tab, stats_btn, history_chatbot, guest_chat_warning,
             chatbot, session_id, mic_chat
         ]
     )
@@ -5541,7 +6568,7 @@ with gr.Blocks(title="All Mind") as demo:
                 let pollInterval = null;
                 let localStorageInterval = null;
 
-                const authCheckUrl = 'http://localhost:5000/api/check_auth';
+                const authCheckUrl = window.location.origin + '/api/check_auth';
 
                 // Function to stop all polling
                 function stopPolling() {
@@ -5685,68 +6712,408 @@ firebase_login_api = gr.Interface(
 )
 
 # ============================================================================
-# ✅ CRITICAL: Queue MUST be called here (after all components defined)
-# ============================================================================
-demo.queue()
-
-# ============================================================================
 # ✅ MOUNT API INTERFACES
 # ============================================================================
 # Combine main demo with API interfaces
-from gradio import mount_gradio_app
 
-# This creates the combined app with all endpoints
+from gradio import mount_gradio_app
 combined_app = gr.TabbedInterface(
     [demo, check_auth_api, firebase_login_api],
     ["Main", "Auth Check", "Firebase Login"],
     title="All Mind"
 )
 
+print("=" * 80)
+print("✅ STEP 4: All imports done, starting Gradio...")
+print("=" * 80)
 # ============================================================================
-# CORRECTED SERVER STARTUP - ORIGINAL THREADING METHOD
+# WORKING SERVER STARTUP - Replace your entire if __name__ == "__main__": section
 # ============================================================================
 if __name__ == "__main__":
-    from threading import Thread
+    import uvicorn
+    from fastapi import FastAPI, Request
+    from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+    from fastapi.middleware.cors import CORSMiddleware
 
-    logging.info("=" * 80)
-    logging.info("🚀 APPLICATION STARTING")
-    logging.info(f"   Gradio UI: http://localhost:7860")
-    logging.info(f"   API Server: http://localhost:5000")
-    if FIREBASE_AVAILABLE:
-        logging.info("   Firebase: ✅ Ready")
-    else:
-        logging.info("   Firebase: ⚠️ Not configured")
-    logging.info("=" * 80)
-
+    print("=" * 80)
+    print("🚀 STARTING APPLICATION")
+    print("=" * 80)
 
     # ============================================================================
-    # ✅ START FLASK API SERVER (Port 5000) - Runs in separate thread
+    # STEP 1: Create FastAPI app
     # ============================================================================
-    def run_flask():
-        """Run Flask API server on port 5000"""
-        logging.info("🔥 Starting Flask API server on port 5000...")
-        flask_app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    app = FastAPI(title="All Mind")
 
-
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    logging.info("✅ Flask API server running on http://localhost:5000")
-
-    # Small delay to ensure Flask starts
-    import time
-
-    time.sleep(1)
-
-    # ============================================================================
-    # ✅ START GRADIO (Port 7860)
-    # ============================================================================
-    logging.info("🚀 Starting Gradio UI on port 7860...")
-    demo.queue()
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True,
-        ssr_mode=False
+    # Add CORS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
+
+
+    # ============================================================================
+    # STEP 2: Define API routes BEFORE mounting Gradio
+    # ============================================================================
+
+    @app.get("/api/test")
+    async def test_endpoint():
+        """Test endpoint"""
+        return {
+            "status": "✅ Working",
+            "firebase": FIREBASE_AVAILABLE,
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+    @app.get("/api/check_auth")
+    async def check_auth_api():
+        """Check authentication status"""
+        return {
+            "logged_in": current_user.get("logged_in", False),
+            "username": current_user.get("username"),
+            "email": current_user.get("email"),
+            "is_guest": current_user.get("is_guest", True),
+            "full_name": current_user.get("full_name", "")
+        }
+
+
+    @app.post("/api/firebase-login")
+    async def firebase_login_api(request: Request):
+        """Handle Firebase authentication"""
+        logging.info("🔥 Firebase login API called")
+
+        try:
+            data = await request.json()
+            token = data.get("token")
+
+            if not token:
+                return JSONResponse(
+                    {"success": False, "error": "No token provided"},
+                    status_code=400
+                )
+
+            # Verify token
+            user_info = verify_firebase_token(token)
+            if not user_info:
+                return JSONResponse(
+                    {"success": False, "error": "Invalid or expired token"},
+                    status_code=401
+                )
+
+            # Register or login user
+            success, message = register_or_login_firebase_user(user_info)
+
+            if success:
+                # Notify Gradio
+                notify_gradio_login({
+                    "username": current_user["username"],
+                    "email": current_user["email"],
+                    "full_name": current_user.get("full_name", "")
+                })
+
+                return JSONResponse({
+                    "success": True,
+                    "message": message,
+                    "user": {
+                        "username": current_user["username"],
+                        "email": current_user["email"],
+                        "full_name": current_user.get("full_name", "")
+                    }
+                })
+            else:
+                return JSONResponse(
+                    {"success": False, "error": message},
+                    status_code=500
+                )
+
+        except Exception as e:
+            logging.error(f"Firebase login error: {e}")
+            logging.error(traceback.format_exc())
+            return JSONResponse(
+                {"success": False, "error": str(e)},
+                status_code=500
+            )
+
+
+    @app.get("/firebase-auth")
+    async def firebase_auth_page(request: Request):
+        """Serve Firebase authentication page"""
+        logging.info(f"🔥 Firebase auth page requested: {request.url}")
+
+        if not FIREBASE_AVAILABLE:
+            return HTMLResponse("""
+                <html>
+                    <body style="font-family: Arial; text-align: center; padding: 50px;">
+                        <h1>⚠️ Firebase Not Configured</h1>
+                        <p>Please configure Firebase to use Google Sign-In</p>
+                    </body>
+                </html>
+            """)
+
+        config_str = json.dumps(firebase_config)
+
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign In - All Mind</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }}
+
+        .auth-container {{
+            background: white;
+            padding: 50px 40px;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+        }}
+
+        h1 {{
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 32px;
+        }}
+
+        .subtitle {{
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 16px;
+        }}
+
+        #google-btn {{
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            padding: 16px 32px;
+            font-size: 16px;
+            font-weight: 500;
+            border-radius: 8px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(66, 133, 244, 0.4);
+            width: 100%;
+        }}
+
+        #google-btn:hover {{
+            background-color: #357ae8;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(66, 133, 244, 0.6);
+        }}
+
+        #google-btn:disabled {{
+            background-color: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }}
+
+        #status {{
+            margin-top: 25px;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            display: none;
+        }}
+
+        .success {{
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+            display: block;
+        }}
+
+        .error {{
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            display: block;
+        }}
+
+        .info {{
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+            display: block;
+        }}
+
+        .spinner {{
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #4285f4;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-right: 10px;
+        }}
+
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="auth-container">
+        <h1>🔐 Sign In</h1>
+        <p class="subtitle">Sign in with your Google account to continue</p>
+
+        <button id="google-btn">
+            <svg width="18" height="18" viewBox="0 0 48 48">
+                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+            </svg>
+            Sign in with Google
+        </button>
+
+        <div id="status"></div>
+    </div>
+
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+
+    <script>
+        // Firebase config
+        const firebaseConfig = {config_str};
+
+        console.log('🔥 Initializing Firebase...');
+        console.log('Config:', firebaseConfig);
+
+        // Validate config
+        if (!firebaseConfig.apiKey || !firebaseConfig.authDomain) {{
+            alert('❌ Firebase configuration is incomplete');
+            throw new Error('Firebase config missing');
+        }}
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const provider = new firebase.auth.GoogleAuthProvider();
+
+        // Get elements
+        const btn = document.getElementById('google-btn');
+        const status = document.getElementById('status');
+
+        // Sign in handler
+        btn.addEventListener('click', async () => {{
+            btn.disabled = true;
+            status.innerHTML = '<div class="spinner"></div> Opening Google Sign-In...';
+            status.className = 'info';
+
+            try {{
+                console.log('🔑 Starting Google sign-in...');
+
+                // Sign in with popup
+                const result = await auth.signInWithPopup(provider);
+                const user = result.user;
+
+                console.log('✅ Signed in:', user.email);
+
+                status.innerHTML = '<div class="spinner"></div> Getting authentication token...';
+
+                // Get ID token
+                const token = await user.getIdToken();
+                console.log('✅ Got token');
+
+                status.innerHTML = '<div class="spinner"></div> Sending to server...';
+
+                // Send to server
+                const response = await fetch('/api/firebase-login', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json'
+                    }},
+                    body: JSON.stringify({{ token: token }})
+                }});
+
+                console.log('📥 Server response status:', response.status);
+
+                const data = await response.json();
+                console.log('📥 Server response data:', data);
+
+                if (data.success) {{
+                    status.innerHTML = '✅ Success! Redirecting...';
+                    status.className = 'success';
+
+                    // Store login event
+                    localStorage.setItem('firebase_login_event', JSON.stringify({{
+                        username: data.user.username,
+                        email: data.user.email,
+                        timestamp: Date.now()
+                    }}));
+
+                    // Close window and reload parent
+                    setTimeout(() => {{
+                        window.close();
+                        if (window.opener) {{
+                            window.opener.location.reload();
+                        }}
+                    }}, 1000);
+                }} else {{
+                    throw new Error(data.error || 'Login failed');
+                }}
+
+            }} catch (error) {{
+                console.error('❌ Error:', error);
+                status.textContent = '❌ Error: ' + error.message;
+                status.className = 'error';
+                btn.disabled = false;
+            }}
+        }});
+    </script>
+</body>
+</html>
+        """
+
+        return HTMLResponse(content=html_content)
+
+
+    # ============================================================================
+    # STEP 3: Mount Gradio at root
+    # ============================================================================
+    gradio_app = gr.mount_gradio_app(app, demo, path="/")
+
+    # ============================================================================
+    # STEP 4: Log all routes
+    # ============================================================================
+    print("=" * 80)
+    print("✅ SERVER READY - ROUTES:")
+    print("   http://localhost:7860/              (Gradio UI)")
+    print("   http://localhost:7860/firebase-auth (Firebase Auth Page)")
+    print("   http://localhost:7860/api/test      (Test API)")
+    print("   http://localhost:7860/api/check-auth")
+    print("   http://localhost:7860/api/firebase-login")
+    print("=" * 80)
+    print(f"🔥 Firebase: {'✅ Enabled' if FIREBASE_AVAILABLE else '❌ Disabled'}")
+    print("=" * 80)
+
+    # ============================================================================
+    # STEP 5: Start server
+    # ============================================================================
+    uvicorn.run(gradio_app, host="0.0.0.0", port=7860, log_level="info")
